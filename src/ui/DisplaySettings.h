@@ -54,4 +54,9 @@ void setShowVerseLabels(bool show);
 bool showBibleReference();
 void setShowBibleReference(bool show);
 
+// Clears every setting above back to its default (font, text scale,
+// alignment, verse labels, bible reference) — used by "Сбросить оформление
+// показа" in Настройки → Общие.
+void resetAll();
+
 } // namespace DisplaySettings

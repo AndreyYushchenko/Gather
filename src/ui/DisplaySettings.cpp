@@ -111,4 +111,12 @@ void setShowBibleReference(bool show)
     QSettings().setValue(QLatin1String(kBibleRefKey), show);
 }
 
+void resetAll()
+{
+    QSettings settings;
+    settings.beginGroup(QStringLiteral("display"));
+    settings.remove(QString());
+    settings.endGroup();
+}
+
 } // namespace DisplaySettings

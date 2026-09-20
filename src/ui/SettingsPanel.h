@@ -11,10 +11,16 @@ class QStackedWidget;
 class QVBoxLayout;
 
 // "Settings" screen: a left section nav + a card on the right, one page per
-// design frame (Общие/Показ/Библия/Песни и сборники/База данных/Горячие
-// клавиши/OBS и сеть/Резервная копия/Внешний вид). Rows mirror the design;
-// a handful are wired to real app state (data folder, DB size, OBS URL/IP,
-// bible translation, library counts) where the app already tracks it.
+// section (Общие/Показ/Библия/Песни и сборники/База данных/Горячие
+// клавиши/OBS и сеть/Резервная копия). Every interactive control here is
+// wired to something the app actually does — no decorative toggles/dropdowns
+// that silently do nothing when changed. Rows that only ever reflect
+// existing, non-configurable behavior (e.g. "shadow is always on") are shown
+// as plain read-only info, not as a control the user could reasonably expect
+// to flip. See the code-review note from 2026-09-20: the previous version of
+// this file mirrored the design.pen mockup wholesale, including ~25 controls
+// (theme/language switching, chords, transitions, cloud sync, password auth,
+// scheduled backups, ...) with no backing implementation at all.
 class SettingsPanel : public QWidget {
     Q_OBJECT
 public:
@@ -31,6 +37,10 @@ signals:
 
 private:
     void buildUi();
+    // (Re)fills m_stack with the 8 pages below, in nav order. Split out so
+    // "Сбросить оформление показа" can rebuild the stack after clearing
+    // DisplaySettings, without duplicating the addWidget list.
+    void populateStack();
     // Adds the font-family + text-scale rows for the given profile
     // (ContentType::BibleVerse or ::Song) to a subsection's row layout.
     void addFontSizeRows(QVBoxLayout *rows, ContentType type);
@@ -42,7 +52,6 @@ private:
     QWidget *buildHotkeysPage();
     QWidget *buildObsPage();
     QWidget *buildBackupPage();
-    QWidget *buildAppearancePage();
 
     QStackedWidget *m_stack = nullptr;
 
@@ -50,6 +59,17 @@ private:
     QLabel *m_dbSizeLabel = nullptr;
     QLabel *m_obsUrlLabel = nullptr;
     QLabel *m_obsIpLabel = nullptr;
-    QComboBox *m_bibleInfoLabel = nullptr;
+    QLabel *m_bibleInfoLabel = nullptr;
     QLabel *m_countsLabel = nullptr;
+    QLabel *m_lastBackupLabel = nullptr;
+
+    // Cached from the last setInfo() call, so populateStack() can restore
+    // the labels above after a full page rebuild (see "Сбросить...").
+    bool m_hasInfo = false;
+    QString m_lastDataDir;
+    QString m_lastObsUrl;
+    QString m_lastBibleTranslation;
+    int m_lastBibleBookCount = 0;
+    int m_lastBibleVerseCount = 0;
+    QMap<ContentType, int> m_lastCounts;
 };

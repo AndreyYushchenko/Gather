@@ -31,6 +31,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QShortcut>
 #include <QSqlDatabase>
 #include <QStackedWidget>
@@ -613,10 +614,13 @@ void MainWindow::onImportExport()
         const bool ok = QFile::copy(Database::dataDir() + QStringLiteral("/gather.db"), backupDir + QStringLiteral("/gather.db"))
             && copyDirRecursively(Database::photosDir(), backupDir + QStringLiteral("/photos"));
 
-        if (ok)
+        if (ok) {
+            // Read back by SettingsPanel's "Последняя копия" row — see setInfo().
+            QSettings().setValue(QStringLiteral("backup/lastExportedAt"), QDateTime::currentDateTime());
             QMessageBox::information(this, tr("Готово"), tr("Резервная копия сохранена в:\n%1").arg(backupDir));
-        else
+        } else {
             QMessageBox::warning(this, tr("Ошибка"), tr("Не удалось создать резервную копию."));
+        }
     } else if (box.clickedButton() == importButton) {
         const QString backupDir = QFileDialog::getExistingDirectory(this, tr("Выберите папку с резервной копией"));
         if (backupDir.isEmpty())

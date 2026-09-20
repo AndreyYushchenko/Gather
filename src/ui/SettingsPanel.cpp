@@ -7,18 +7,27 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDateTime>
 #include <QFileInfo>
 #include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSettings>
 #include <QSlider>
+#include <QSqlError>
+#include <QSqlQuery>
 #include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+
+namespace {
+const char *kLastBackupKey = "backup/lastExportedAt";
+}
 
 namespace {
 
@@ -168,22 +177,6 @@ QLabel *makeKeyValue(const QString &text)
     return label;
 }
 
-QWidget *makeStatusBadge(const QString &text, const QString &color)
-{
-    auto *wrap = new QWidget;
-    auto *wrapLayout = new QHBoxLayout(wrap);
-    wrapLayout->setContentsMargins(0, 0, 0, 0);
-    wrapLayout->setSpacing(6);
-    auto *dot = new QLabel;
-    dot->setFixedSize(8, 8);
-    dot->setStyleSheet(QStringLiteral("background: %1; border-radius: 4px;").arg(color));
-    auto *label = new QLabel(text);
-    label->setStyleSheet(QStringLiteral("font-size: 12.5px; font-weight: 600; color: %1;").arg(color));
-    wrapLayout->addWidget(dot);
-    wrapLayout->addWidget(label);
-    return wrap;
-}
-
 QWidget *makePage(const QString &title)
 {
     auto *page = new QWidget;
@@ -304,24 +297,15 @@ void SettingsPanel::buildUi()
         {"settings", "Общие"},
         {"monitor", "Показ"},
         {"book-open", "Библия"},
-        {"music", "Песни и сборники"},
+        {"music", "Песни"},
         {"database", "База данных"},
         {"keyboard", "Горячие клавиши"},
         {"wifi", "OBS и сеть"},
         {"cloud", "Резервная копия"},
-        {"palette", "Внешний вид"},
     };
 
     m_stack = new QStackedWidget;
-    m_stack->addWidget(buildGeneralPage());
-    m_stack->addWidget(buildShowPage());
-    m_stack->addWidget(buildBiblePage());
-    m_stack->addWidget(buildSongsPage());
-    m_stack->addWidget(buildDatabasePage());
-    m_stack->addWidget(buildHotkeysPage());
-    m_stack->addWidget(buildObsPage());
-    m_stack->addWidget(buildBackupPage());
-    m_stack->addWidget(buildAppearancePage());
+    populateStack();
 
     auto *navGroup = new QButtonGroup(this);
     int index = 0;
@@ -358,22 +342,34 @@ void SettingsPanel::buildUi()
     scrollArea->setWidget(m_stack);
     cardLayout->addWidget(scrollArea, 1);
 
+    // Every control above applies immediately (via DisplaySettings/QSettings)
+    // rather than staging a draft, so there's nothing for a Save/Cancel pair
+    // to actually do — only a real action belongs here: resetting the
+    // presentation-styling settings back to their defaults.
     auto *actionsRow = new QHBoxLayout;
-    auto *resetButton = new QPushButton(tr("  Сбросить"));
+    auto *resetButton = new QPushButton(tr("  Сбросить оформление показа"));
     resetButton->setObjectName(QStringLiteral("OutlineButton"));
     resetButton->setIcon(IconProvider::icon(QStringLiteral("rotate-ccw"), QColor(Theme::TextDarkPrimary), 15));
     resetButton->setCursor(Qt::PointingHandCursor);
+    connect(resetButton, &QPushButton::clicked, this, [this]() {
+        const auto reply = QMessageBox::question(this, tr("Сброс оформления показа"),
+            tr("Сбросить шрифты, размер текста, выравнивание и видимость подписей/ссылок "
+               "(разделы «Показ» и «Библия») к значениям по умолчанию?"));
+        if (reply != QMessageBox::Yes)
+            return;
+        DisplaySettings::resetAll();
+        emit displaySettingsChanged();
+        const int current = m_stack->currentIndex();
+        while (m_stack->count() > 0) {
+            QWidget *page = m_stack->widget(0);
+            m_stack->removeWidget(page);
+            page->deleteLater();
+        }
+        populateStack();
+        m_stack->setCurrentIndex(current);
+    });
     actionsRow->addWidget(resetButton);
     actionsRow->addStretch();
-    auto *cancelButton = new QPushButton(tr("Отмена"));
-    cancelButton->setObjectName(QStringLiteral("OutlineButton"));
-    cancelButton->setCursor(Qt::PointingHandCursor);
-    actionsRow->addWidget(cancelButton);
-    auto *saveButton = new QPushButton(tr("  Сохранить"));
-    saveButton->setObjectName(QStringLiteral("PrimaryButton"));
-    saveButton->setIcon(IconProvider::icon(QStringLiteral("save"), QColor(Theme::TextLightPrimary), 15));
-    saveButton->setCursor(Qt::PointingHandCursor);
-    actionsRow->addWidget(saveButton);
     cardLayout->addLayout(actionsRow);
 
     bodyRow->addWidget(card, 1);
@@ -406,32 +402,36 @@ void SettingsPanel::buildUi()
     )").arg(Theme::TextDarkPrimary, Theme::BorderLight, Theme::AccentBlue, Theme::TextDarkSecondary, Theme::AccentBlueBg));
 }
 
+void SettingsPanel::populateStack()
+{
+    m_stack->addWidget(buildGeneralPage());
+    m_stack->addWidget(buildShowPage());
+    m_stack->addWidget(buildBiblePage());
+    m_stack->addWidget(buildSongsPage());
+    m_stack->addWidget(buildDatabasePage());
+    m_stack->addWidget(buildHotkeysPage());
+    m_stack->addWidget(buildObsPage());
+    m_stack->addWidget(buildBackupPage());
+    // The pages above just created fresh copies of m_dataDirLabel and co.,
+    // so the live values need reapplying — same call the last real setInfo()
+    // made, replayed from cache.
+    if (m_hasInfo)
+        setInfo(m_lastDataDir, m_lastObsUrl, m_lastBibleTranslation, m_lastBibleBookCount, m_lastBibleVerseCount, m_lastCounts);
+}
+
 QWidget *SettingsPanel::buildGeneralPage()
 {
     auto *page = makePage(tr("Общие"));
     auto *layout = pageLayout(page);
 
-    auto *interfaceRows = makeSubsection(layout, tr("Интерфейс"));
-    auto *rowsLayout = qobject_cast<QVBoxLayout *>(interfaceRows->layout());
-    rowsLayout->addWidget(makeRow(tr("Тема приложения"), makeValueBox({tr("Светлая (по умолчанию)"), tr("Тёмная")})));
-    rowsLayout->addWidget(makeRow(tr("Язык интерфейса"), makeValueBox({tr("Русский"), tr("Українська"), tr("English")})));
+    auto *notesRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Заметки оператора"))->layout());
+    notesRows->addWidget(makeRow(tr("Автосохранение"),
+        makeStaticValue(tr("Включено — сохраняются автоматически через ~0.6 секунды после ввода"))));
 
-    auto *startupRows = makeSubsection(layout, tr("Запуск и поведение"));
-    auto *startupLayout = qobject_cast<QVBoxLayout *>(startupRows->layout());
-    startupLayout->addWidget(makeRow(tr("При запуске открывать"),
-        makeValueBox({tr("Последний использованный раздел"), tr("Песни"), tr("Библия")})));
-    startupLayout->addWidget(makeRow(tr("Запоминать последний открытый элемент"), makeToggle(true)));
-    startupLayout->addWidget(makeRow(tr("Автосохранение заметок"), makeToggle(true),
-        tr("Заметки оператора сохраняются автоматически через ~0.6 секунды после ввода")));
-
-    auto *textRows = makeSubsection(layout, tr("Текст и отображение"));
-    auto *textLayout = qobject_cast<QVBoxLayout *>(textRows->layout());
-    textLayout->addWidget(makeRow(tr("Масштаб шрифта интерфейса"), makeValueBox({tr("100% (по умолчанию)"), tr("110%"), tr("125%")})));
-
-    auto *showRows = makeSubsection(layout, tr("Проектор и показ"));
-    auto *showLayout = qobject_cast<QVBoxLayout *>(showRows->layout());
-    showLayout->addWidget(makeRow(tr("Автоматически включать полный экран на проекторе"), makeToggle(true)));
-    showLayout->addWidget(makeRow(tr("Горячая клавиша для чёрного экрана"), [] {
+    auto *showRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Проектор и показ"))->layout());
+    showRows->addWidget(makeRow(tr("Полноэкранный режим на проекторе"),
+        makeStaticValue(tr("Включается автоматически, если подключён второй монитор"))));
+    showRows->addWidget(makeRow(tr("Горячая клавиша для чёрного экрана"), [] {
         auto *label = new QLabel(QStringLiteral("B"));
         label->setAlignment(Qt::AlignCenter);
         label->setFixedSize(40, 28);
@@ -444,7 +444,7 @@ QWidget *SettingsPanel::buildGeneralPage()
         DisplaySettings::setAlignment(index == 1 ? DisplaySettings::Alignment::Left : DisplaySettings::Alignment::Center);
         emit displaySettingsChanged();
     });
-    showLayout->addWidget(makeRow(tr("Выравнивание текста на слайдах"), alignBox));
+    showRows->addWidget(makeRow(tr("Выравнивание текста на слайдах"), alignBox));
 
     layout->addStretch();
     return page;
@@ -455,13 +455,10 @@ QWidget *SettingsPanel::buildShowPage()
     auto *page = makePage(tr("Показ"));
     auto *layout = pageLayout(page);
 
-    auto *screenRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Экран показа"))->layout());
-    screenRows->addWidget(makeRow(tr("Монитор для показа"), makeValueBox({tr("Монитор 2 (1920×1080)"), tr("Монитор 1 (основной)")})));
-    screenRows->addWidget(makeRow(tr("Разрешение"), makeValueBox({tr("Автоматически"), tr("1920×1080"), tr("1280×720")})));
-
     auto *slideRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Внешний вид слайдов (песни, объявления, фото)"))->layout());
     addFontSizeRows(slideRows, ContentType::Song);
-    slideRows->addWidget(makeRow(tr("Тень текста для читаемости"), makeToggle(true)));
+    slideRows->addWidget(makeRow(tr("Тень текста для читаемости"),
+        makeStaticValue(tr("Включена — применяется всегда, когда за текстом есть фон"))));
 
     auto *labelsToggle = makeToggle(DisplaySettings::showVerseLabels());
     connect(labelsToggle, &QCheckBox::toggled, this, [this](bool checked) {
@@ -470,14 +467,6 @@ QWidget *SettingsPanel::buildShowPage()
     });
     slideRows->addWidget(makeRow(tr("Показывать «Куплет»/«Припев» в тексте песен"), labelsToggle,
         tr("Если выключено, эти пометки скрываются только на экране показа — в тексте песни в библиотеке они остаются")));
-
-    auto *transitionRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Переходы между слайдами"))->layout());
-    transitionRows->addWidget(makeRow(tr("Анимация перехода"), makeValueBox({tr("Плавное затухание"), tr("Без анимации"), tr("Сдвиг")})));
-    transitionRows->addWidget(makeRow(tr("Длительность перехода"), makeValueBox({tr("0.3 сек"), tr("0.15 сек"), tr("0.6 сек")})));
-
-    auto *logoRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Логотип и заставка"))->layout());
-    logoRows->addWidget(makeRow(tr("Показывать логотип церкви"), makeToggle(true)));
-    logoRows->addWidget(makeRow(tr("Экран между службами"), makeValueBox({tr("Логотип с фоном"), tr("Чёрный экран"), tr("Ничего")})));
 
     layout->addStretch();
     return page;
@@ -498,20 +487,10 @@ QWidget *SettingsPanel::buildBiblePage()
     displayRows->addWidget(makeRow(tr("Показывать ссылку (книга, глава:стих) на экране"), refToggle,
         tr("Ссылка выводится первой строкой перед текстом стиха на проекторе и в OBS")));
 
-    auto *translationRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Перевод по умолчанию"))->layout());
-    m_bibleInfoLabel = makeValueBox({tr("нет данных")});
-    m_bibleInfoLabel->setEnabled(false);
-    translationRows->addWidget(makeRow(tr("Основной перевод"), m_bibleInfoLabel));
-    translationRows->addWidget(makeRow(tr("Показывать альтернативный перевод"), makeToggle(false)));
-
-    auto *formatRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Формат отображения"))->layout());
-    formatRows->addWidget(makeRow(tr("Формат ссылки"), makeValueBox({tr("Полное название книги"), tr("Сокращение")})));
-    formatRows->addWidget(makeRow(tr("Показывать номера стихов"), makeToggle(true)));
-    formatRows->addWidget(makeRow(tr("Разделять по стихам по умолчанию"), makeToggle(true)));
-
-    auto *historyRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("История и избранное"))->layout());
-    historyRows->addWidget(makeRow(tr("Хранить историю поиска"), makeToggle(true)));
-    historyRows->addWidget(makeRow(tr("Количество недавних мест"), makeValueBox({QStringLiteral("5"), QStringLiteral("10"), QStringLiteral("15")})));
+    auto *translationRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Перевод"))->layout());
+    m_bibleInfoLabel = makeStaticValue(tr("нет данных"));
+    translationRows->addWidget(makeRow(tr("Загруженный перевод"), m_bibleInfoLabel,
+        tr("Другой перевод импортируется отдельно через scripts/import_bible.py — сменить его из интерфейса пока нельзя")));
 
     layout->addStretch();
     return page;
@@ -519,19 +498,16 @@ QWidget *SettingsPanel::buildBiblePage()
 
 QWidget *SettingsPanel::buildSongsPage()
 {
-    auto *page = makePage(tr("Песни и сборники"));
+    // No chords/columns, chorus auto-detection, verse numbering, or a
+    // ChordPro importer actually exist in the app — those rows used to sit
+    // here as decorative controls with nothing behind them. The song model
+    // (ContentItem::text) is plain lyrics text; the only real per-song
+    // format toggle (show "Куплет"/"Припев" labels) already lives on the
+    // Показ page, since it affects the projected slide, not song storage.
+    auto *page = makePage(tr("Песни"));
     auto *layout = pageLayout(page);
 
-    auto *collectionRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Сборники"))->layout());
-    collectionRows->addWidget(makeRow(tr("Активный сборник"), makeValueBox({tr("Основной сборник")})));
-
-    auto *formatRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Формат текста"))->layout());
-    formatRows->addWidget(makeRow(tr("Показывать аккорды"), makeToggle(false)));
-    formatRows->addWidget(makeRow(tr("Автоматически определять припев"), makeToggle(true)));
-    formatRows->addWidget(makeRow(tr("Нумеровать куплеты"), makeToggle(true)));
-
     auto *importRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Импорт песен"))->layout());
-    importRows->addWidget(makeRow(tr("Формат импорта по умолчанию"), makeValueBox({tr("ChordPro (.cho)"), tr("Обычный текст (.txt)")})));
     auto *importButton = makeActionButton(tr("Импортировать файлы песен..."));
     connect(importButton, &QPushButton::clicked, this, &SettingsPanel::songImportRequested);
     importRows->addWidget(makeRow(tr("Загрузить файлы"), importButton,
@@ -553,12 +529,18 @@ QWidget *SettingsPanel::buildDatabasePage()
     storageRows->addWidget(makeRow(tr("Размер базы данных"), m_dbSizeLabel));
 
     auto *maintenanceRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Обслуживание"))->layout());
-    maintenanceRows->addWidget(makeRow(tr("Оптимизация базы данных"), makeActionButton(tr("Запустить"))));
+    auto *optimizeButton = makeActionButton(tr("Запустить"));
+    connect(optimizeButton, &QPushButton::clicked, this, [this]() {
+        QSqlQuery query(QStringLiteral("VACUUM"));
+        if (query.lastError().isValid())
+            QMessageBox::warning(this, tr("Ошибка"), tr("Не удалось оптимизировать базу данных: %1").arg(query.lastError().text()));
+        else
+            QMessageBox::information(this, tr("Готово"), tr("База данных оптимизирована."));
+    });
+    maintenanceRows->addWidget(makeRow(tr("Оптимизация базы данных"), optimizeButton,
+        tr("Сжимает файл базы данных (VACUUM) — полезно после удаления большого числа записей")));
     m_countsLabel = makeStaticValue(QString());
     maintenanceRows->addWidget(makeRow(tr("Записей в библиотеке"), m_countsLabel));
-
-    auto *syncRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Синхронизация"))->layout());
-    syncRows->addWidget(makeRow(tr("Синхронизировать с облаком"), makeToggle(false)));
 
     auto *backupRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Резервное копирование"))->layout());
     auto *ioButton = makeActionButton(tr("Экспорт / Импорт базы данных..."));
@@ -582,11 +564,8 @@ QWidget *SettingsPanel::buildHotkeysPage()
 
     auto *presentRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Показ"))->layout());
     presentRows->addWidget(makeRow(tr("Начать показ"), makeKeyValue(QStringLiteral("F5"))));
-    presentRows->addWidget(makeRow(tr("Завершить показ"), makeKeyValue(tr("Esc"))));
-
-    auto *navRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Навигация"))->layout());
-    navRows->addWidget(makeRow(tr("Поиск"), makeKeyValue(QStringLiteral("Ctrl+F"))));
-    navRows->addWidget(makeRow(tr("Добавить слайд"), makeKeyValue(QStringLiteral("Ctrl+N"))));
+    presentRows->addWidget(makeRow(tr("Закрыть окно показа"), makeKeyValue(tr("Esc")),
+        tr("Работает, когда активно окно показа (проектор)")));
 
     layout->addStretch();
     return page;
@@ -600,17 +579,14 @@ QWidget *SettingsPanel::buildObsPage()
     auto *outputRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Вывод на OBS"))->layout());
     m_obsUrlLabel = makeStaticValue(QString());
     outputRows->addWidget(makeRow(tr("Веб-адрес для источника Browser"), m_obsUrlLabel));
-    outputRows->addWidget(makeRow(tr("Автозапуск вывода при старте"), makeToggle(true)));
+    outputRows->addWidget(makeRow(tr("Локальный сервер"), makeStaticValue(tr("Запускается автоматически при старте приложения"))));
 
     auto *networkRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Сеть"))->layout());
     m_obsIpLabel = makeStaticValue(QString());
     networkRows->addWidget(makeRow(tr("IP-адрес устройства"), m_obsIpLabel));
-    networkRows->addWidget(makeRow(tr("Использовать статический IP"), makeToggle(false)));
 
-    auto *securityRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Безопасность"))->layout());
-    securityRows->addWidget(makeRow(tr("Требовать пароль для подключения"), makeToggle(false)));
-
-    auto *hint = new QLabel(tr("Добавьте источник «Браузер» (Browser Source) в OBS с этим адресом — слайд будет обновляться в сцене синхронно с показом. Оба устройства должны быть в одной локальной сети."));
+    auto *hint = new QLabel(tr("Добавьте источник «Браузер» (Browser Source) в OBS с этим адресом — слайд будет обновляться в сцене синхронно с показом. Оба устройства должны быть в одной локальной сети.\n\n"
+                                "Сервер отдаёт данные без пароля — используйте его только в доверенной локальной сети."));
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("font-size: 12.5px; color: %1;").arg(Theme::TextDarkSecondary));
     layout->addWidget(hint);
@@ -620,15 +596,13 @@ QWidget *SettingsPanel::buildObsPage()
 
 QWidget *SettingsPanel::buildBackupPage()
 {
+    // No scheduled/automatic backups exist — only the manual export/import
+    // flow (MainWindow::onImportExport). A fake "auto-backup" toggle with a
+    // frequency/retention dropdown used to sit here doing nothing.
     auto *page = makePage(tr("Резервная копия"));
     auto *layout = pageLayout(page);
 
-    auto *autoRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Автоматическое резервное копирование"))->layout());
-    autoRows->addWidget(makeRow(tr("Включить автобэкап"), makeToggle(true)));
-    autoRows->addWidget(makeRow(tr("Частота"), makeValueBox({tr("Ежедневно"), tr("Еженедельно"), tr("Вручную")})));
-    autoRows->addWidget(makeRow(tr("Хранить копий"), makeValueBox({QStringLiteral("7"), QStringLiteral("14"), QStringLiteral("30")})));
-
-    auto *manualRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Ручное управление"))->layout());
+    auto *manualRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Резервное копирование"))->layout());
     auto *createButton = makeActionButton(tr("Создать сейчас"));
     connect(createButton, &QPushButton::clicked, this, &SettingsPanel::importExportRequested);
     manualRows->addWidget(makeRow(tr("Создать резервную копию"), createButton));
@@ -637,27 +611,8 @@ QWidget *SettingsPanel::buildBackupPage()
     manualRows->addWidget(makeRow(tr("Восстановить из резервной копии"), restoreButton));
 
     auto *lastRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Последняя копия"))->layout());
-    lastRows->addWidget(makeRow(tr("Дата последней копии"), makeStaticValue(tr("ещё не создавалась"))));
-    lastRows->addWidget(makeRow(tr("Статус"), makeStatusBadge(tr("Нет данных"), Theme::TextDarkSecondary)));
-
-    layout->addStretch();
-    return page;
-}
-
-QWidget *SettingsPanel::buildAppearancePage()
-{
-    auto *page = makePage(tr("Внешний вид"));
-    auto *layout = pageLayout(page);
-
-    auto *themeRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Тема"))->layout());
-    themeRows->addWidget(makeRow(tr("Цветовая схема"), makeValueBox({tr("Светлая"), tr("Тёмная")})));
-
-    auto *interfaceRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Интерфейс"))->layout());
-    interfaceRows->addWidget(makeRow(tr("Плотность интерфейса"), makeValueBox({tr("Обычная"), tr("Компактная")})));
-    interfaceRows->addWidget(makeRow(tr("Закруглённые углы"), makeToggle(true)));
-
-    auto *fontRows = qobject_cast<QVBoxLayout *>(makeSubsection(layout, tr("Шрифт интерфейса"))->layout());
-    fontRows->addWidget(makeRow(tr("Основной шрифт"), makeValueBox({tr("Inter"), tr("Segoe UI")})));
+    m_lastBackupLabel = makeStaticValue(tr("ещё не создавалась"));
+    lastRows->addWidget(makeRow(tr("Дата последней копии"), m_lastBackupLabel));
 
     layout->addStretch();
     return page;
@@ -667,6 +622,14 @@ void SettingsPanel::setInfo(const QString &dataDir, const QString &obsUrl,
                              const QString &bibleTranslation, int bibleBookCount, int bibleVerseCount,
                              const QMap<ContentType, int> &counts)
 {
+    m_hasInfo = true;
+    m_lastDataDir = dataDir;
+    m_lastObsUrl = obsUrl;
+    m_lastBibleTranslation = bibleTranslation;
+    m_lastBibleBookCount = bibleBookCount;
+    m_lastBibleVerseCount = bibleVerseCount;
+    m_lastCounts = counts;
+
     if (m_dataDirLabel)
         m_dataDirLabel->setText(dataDir);
     if (m_dbSizeLabel) {
@@ -682,8 +645,9 @@ void SettingsPanel::setInfo(const QString &dataDir, const QString &obsUrl,
         m_obsIpLabel->setText(host.isEmpty() ? tr("недоступно") : host);
     }
     if (m_bibleInfoLabel) {
-        m_bibleInfoLabel->clear();
-        m_bibleInfoLabel->addItem(bibleTranslation.isEmpty() ? tr("нет данных") : bibleTranslation);
+        m_bibleInfoLabel->setText(bibleTranslation.isEmpty()
+            ? tr("нет данных")
+            : tr("%1 (%2 книг, %3 стихов)").arg(bibleTranslation).arg(bibleBookCount).arg(bibleVerseCount));
     }
     if (m_countsLabel) {
         m_countsLabel->setText(tr("Песни: %1 · Стихи (в избранном): %2 · Объявления: %3 · Фото: %4")
@@ -692,6 +656,8 @@ void SettingsPanel::setInfo(const QString &dataDir, const QString &obsUrl,
             .arg(counts.value(ContentType::Announcement, 0))
             .arg(counts.value(ContentType::Photo, 0)));
     }
-    Q_UNUSED(bibleBookCount);
-    Q_UNUSED(bibleVerseCount);
+    if (m_lastBackupLabel) {
+        const QDateTime last = QSettings().value(QLatin1String(kLastBackupKey)).toDateTime();
+        m_lastBackupLabel->setText(last.isValid() ? last.toString(QStringLiteral("dd.MM.yyyy HH:mm")) : tr("ещё не создавалась"));
+    }
 }
