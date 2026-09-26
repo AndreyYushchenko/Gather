@@ -1,0 +1,4 @@
+;!@Install@!UTF-8!
+Title="Sermon Installer"
+RunProgram="SermonInstaller.exe"
+;!@InstallEnd@!

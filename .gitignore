@@ -3,3 +3,12 @@ build-release/
 *.user
 __pycache__/
 *.pyc
+build*/
+deploy/
+# Installer outputs (made from deploy/ by installer.iss / setup.sed)
+Sermon_Setup.exe
+Sermon_Setup.zip
+SermonInstaller.exe
+*.7z
+# Qt runtime copied next to a build
+*.dll

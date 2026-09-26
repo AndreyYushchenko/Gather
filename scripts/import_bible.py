@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""One-off importer: loads a .spb Bible text dump into the Gather SQLite DB.
+"""One-off importer: loads a .spb Bible text dump into the Sermon SQLite DB.
 
-Usage: python import_bible.py <path-to-spb> <path-to-gather.db>
+Usage: python import_bible.py <path-to-spb> <path-to-sermon.db>
 """
 import sqlite3
 import sys
@@ -49,7 +49,7 @@ def parse_spb(path):
 
 def main():
     if len(sys.argv) != 3:
-        print("Usage: import_bible.py <spb-file> <gather.db>")
+        print("Usage: import_bible.py <spb-file> <sermon.db>")
         sys.exit(1)
 
     spb_path, db_path = sys.argv[1], sys.argv[2]
