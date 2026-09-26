@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(Gather LANGUAGES CXX)
+project(Sermon LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,130 +7,53 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network Svg Multimedia MultimediaWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Sql Network Svg Multimedia MultimediaWidgets LinguistTools)
 
 qt_standard_project_setup()
 
-qt_add_executable(Gather
-    src/main.cpp
-    src/core/ContentItem.h
-    src/core/ContentItem.cpp
-    src/core/Database.h
-    src/core/Database.cpp
-    src/core/ContentRepository.h
-    src/core/ContentRepository.cpp
-    src/core/BibleRepository.h
-    src/core/BibleRepository.cpp
-    src/core/PlaylistRepository.h
-    src/core/PlaylistRepository.cpp
-    src/display/SlideContent.h
-    src/display/SlideContentBuilder.h
-    src/display/SlideContentBuilder.cpp
-    src/display/SlideRenderWidget.h
-    src/display/SlideRenderWidget.cpp
-    src/display/DisplayWindow.h
-    src/display/DisplayWindow.cpp
-    src/display/DisplayServer.h
-    src/display/DisplayServer.cpp
-    src/display/PresentationController.h
-    src/display/PresentationController.cpp
-    src/ui/Theme.h
-    src/ui/Theme.cpp
-    src/ui/DisplaySettings.h
-    src/ui/DisplaySettings.cpp
-    src/ui/IconProvider.h
-    src/ui/IconProvider.cpp
-    src/ui/Sidebar.h
-    src/ui/Sidebar.cpp
-    src/ui/LibraryListPanel.h
-    src/ui/LibraryListPanel.cpp
-    src/ui/DetailPanel.h
-    src/ui/DetailPanel.cpp
-    src/ui/BiblePanel.h
-    src/ui/BiblePanel.cpp
-    src/ui/SettingsPanel.h
-    src/ui/SettingsPanel.cpp
-    src/ui/PlaylistListPanel.h
-    src/ui/PlaylistListPanel.cpp
-    src/ui/PlaylistDetailPanel.h
-    src/ui/PlaylistDetailPanel.cpp
-    src/ui/VideoListPanel.h
-    src/ui/VideoListPanel.cpp
-    src/ui/VideoDetailPanel.h
-    src/ui/VideoDetailPanel.cpp
-    src/ui/ImportExportPanel.h
-    src/ui/ImportExportPanel.cpp
-    src/ui/HelpPanel.h
-    src/ui/HelpPanel.cpp
-    src/ui/DisplayControlPanel.h
-    src/ui/DisplayControlPanel.cpp
-    src/ui/MainWindow.h
-    src/ui/MainWindow.cpp
-    src/ui/ItemEditDialog.h
-    src/ui/ItemEditDialog.cpp
-)
+file(GLOB_RECURSE SRC_FILES "src/*.cpp" "src/*.h")
+
+qt_add_executable(Sermon ${SRC_FILES})
 
 if(WIN32)
-    target_sources(Gather PRIVATE src/app.rc)
+    target_sources(Sermon PRIVATE src/app.rc)
 endif()
 
-target_include_directories(Gather PRIVATE src)
+target_include_directories(Sermon PRIVATE src)
 
-qt_add_resources(Gather "icons"
+# Globbed (not listed by hand): a hand-kept list silently dropped icons
+# added later (timer, x, grip, volume, …) and they drew as empty space.
+file(GLOB ICON_FILES CONFIGURE_DEPENDS "resources/icons/*.svg" "resources/icons/*.png")
+qt_add_resources(Sermon "icons"
     PREFIX "/icons"
     BASE "resources/icons"
-    FILES
-        resources/icons/church.svg
-        resources/icons/plus.svg
-        resources/icons/music.svg
-        resources/icons/book-open.svg
-        resources/icons/megaphone.svg
-        resources/icons/image.svg
-        resources/icons/list-music.svg
-        resources/icons/arrow-left-right.svg
-        resources/icons/settings.svg
-        resources/icons/info.svg
-        resources/icons/search.svg
-        resources/icons/list-filter.svg
-        resources/icons/chevron-down.svg
-        resources/icons/star.svg
-        resources/icons/pencil.svg
-        resources/icons/ellipsis-vertical.svg
-        resources/icons/copy.svg
-        resources/icons/trash-2.svg
-        resources/icons/eye.svg
-        resources/icons/monitor.svg
-        resources/icons/arrow-left.svg
-        resources/icons/arrow-right.svg
-        resources/icons/monitor-off.svg
-        resources/icons/pause.svg
-        resources/icons/external-link.svg
-        resources/icons/qr-code.svg
-        resources/icons/link.svg
-        resources/icons/check.svg
-        resources/icons/flame.svg
-        resources/icons/history.svg
-        resources/icons/database.svg
-        resources/icons/keyboard.svg
-        resources/icons/wifi.svg
-        resources/icons/cloud.svg
-        resources/icons/palette.svg
-        resources/icons/rotate-ccw.svg
-        resources/icons/save.svg
-        resources/icons/cloud-upload.svg
-        resources/icons/file-text.svg
-        resources/icons/download.svg
-        resources/icons/rocket.svg
-        resources/icons/mail.svg
-        resources/icons/video.svg
-        resources/icons/upload.svg
-        resources/icons/youtube.svg
-        resources/icons/play.svg
-        resources/icons/repeat.svg
-        resources/icons/app-256.png
+    FILES ${ICON_FILES}
 )
 
-target_link_libraries(Gather PRIVATE
+# Built-in slide/timer backgrounds (":/backgrounds/…", "builtin:<name>").
+file(GLOB BACKGROUND_FILES CONFIGURE_DEPENDS "resources/backgrounds/*")
+qt_add_resources(Sermon "backgrounds"
+    PREFIX "/backgrounds"
+    BASE "resources/backgrounds"
+    FILES ${BACKGROUND_FILES}
+)
+
+# Interface languages (Настройки → Язык): Ukrainian and English from the
+# .ts sources, plus Qt's own dialog strings.
+qt_add_lrelease(TS_FILES translations/sermon_uk.ts translations/sermon_en.ts
+    QM_FILES_OUTPUT_VARIABLE SERMON_QM_FILES)
+qt_add_resources(Sermon "i18n"
+    PREFIX "/i18n"
+    BASE "${CMAKE_CURRENT_BINARY_DIR}"
+    FILES ${SERMON_QM_FILES}
+)
+qt_add_resources(Sermon "i18n_qt"
+    PREFIX "/i18n"
+    BASE "translations"
+    FILES translations/qtbase_uk.qm translations/qtbase_ru.qm translations/qtbase_en.qm
+)
+
+target_link_libraries(Sermon PRIVATE
     Qt6::Widgets
     Qt6::Sql
     Qt6::Network
@@ -139,6 +62,7 @@ target_link_libraries(Gather PRIVATE
     Qt6::MultimediaWidgets
 )
 
-set_target_properties(Gather PROPERTIES
+
+set_target_properties(Sermon PROPERTIES
     WIN32_EXECUTABLE ON
 )

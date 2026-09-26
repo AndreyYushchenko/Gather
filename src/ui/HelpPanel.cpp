@@ -2,14 +2,22 @@
 #include "IconProvider.h"
 #include "Theme.h"
 
+#include <QClipboard>
+#include <QDesktopServices>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QUrl>
 #include <QVBoxLayout>
+
+namespace {
+constexpr char SupportEmail[] = "sermon.support@gmail.com";
+}
 
 namespace {
 
@@ -19,7 +27,8 @@ QFrame *makeCategoryCard(const QString &iconName, const QString &title, const QS
     card->setObjectName(QStringLiteral("HelpCard"));
     card->setCursor(Qt::PointingHandCursor);
     auto *layout = new QVBoxLayout(card);
-    layout->setSpacing(8);
+    layout->setContentsMargins(18, 18, 18, 18);
+    layout->setSpacing(10);
 
     auto *iconBox = new QLabel;
     iconBox->setFixedSize(38, 38);
@@ -84,8 +93,8 @@ HelpPanel::HelpPanel(QWidget *parent)
 void HelpPanel::buildUi()
 {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(28, 22, 28, 22);
-    root->setSpacing(4);
+    root->setContentsMargins(48, 32, 48, 32);
+    root->setSpacing(18);
 
     auto *title = new QLabel(tr("Справка"));
     title->setStyleSheet(QStringLiteral("font-size: 24px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
@@ -93,28 +102,35 @@ void HelpPanel::buildUi()
     auto *subtitle = new QLabel(tr("Инструкции, ответы на частые вопросы и поддержка"));
     subtitle->setStyleSheet(QStringLiteral("font-size: 13.5px; color: %1;").arg(Theme::TextDarkSecondary));
     root->addWidget(subtitle);
-    root->addSpacing(18);
 
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    // QScrollArea's viewport paints its own palette background (light gray
+    // on Windows) unless told otherwise. Scoped to the viewport: a bare rule
+    // cascaded into the cards and labels and painted over them.
+    scroll->viewport()->setStyleSheet(QStringLiteral("QWidget#qt_scrollarea_viewport { background: #ffffff; }"));
     root->addWidget(scroll, 1);
 
     auto *content = new QWidget;
+    content->setObjectName(QStringLiteral("HelpContent"));
+    content->setAttribute(Qt::WA_StyledBackground, true);
+    content->setStyleSheet(QStringLiteral("QWidget#HelpContent { background: #ffffff; }"));
     auto *layout = new QVBoxLayout(content);
     layout->setContentsMargins(0, 0, 4, 4);
-    layout->setSpacing(20);
+    layout->setSpacing(18);
     scroll->setWidget(content);
 
     auto *searchBox = new QFrame;
     searchBox->setObjectName(QStringLiteral("SearchBox"));
     auto *searchLayout = new QHBoxLayout(searchBox);
-    searchLayout->setContentsMargins(12, 0, 12, 0);
-    searchLayout->setSpacing(8);
+    searchLayout->setContentsMargins(16, 12, 16, 12);
+    searchLayout->setSpacing(10);
     auto *searchIcon = new QLabel;
     searchIcon->setPixmap(IconProvider::pixmap(QStringLiteral("search"), QColor(Theme::TextDarkSecondary), 16));
     searchLayout->addWidget(searchIcon);
     auto *searchEdit = new QLineEdit;
+    searchEdit->setObjectName(QStringLiteral("SearchField")); // Ctrl+F (Горячие клавиши → Поиск)
     searchEdit->setPlaceholderText(tr("Поиск по справке (например: OBS, горячие клавиши)"));
     searchEdit->setFrame(false);
     searchLayout->addWidget(searchEdit, 1);
@@ -124,7 +140,7 @@ void HelpPanel::buildUi()
     cardsRow->setSpacing(16);
     struct Category { const char *icon; const char *title; const char *desc; };
     const Category categories[] = {
-        {"rocket", "Начало работы", "Первые шаги в Gather"},
+        {"rocket", "Начало работы", "Первые шаги в Sermon"},
         {"book-open", "Песни и Библия", "Добавление и редактирование"},
         {"monitor", "Показ и OBS", "Настройка трансляции"},
         {"keyboard", "Горячие клавиши", "Управление с клавиатуры"},
@@ -142,7 +158,7 @@ void HelpPanel::buildUi()
     auto *faqCard = new QFrame;
     faqCard->setObjectName(QStringLiteral("HelpCard"));
     auto *faqLayout = new QVBoxLayout(faqCard);
-    faqLayout->setSpacing(4);
+    faqLayout->setSpacing(0);
 
     const QList<QPair<QString, QString>> faq = {
         {tr("Как подключить вывод к OBS?"),
@@ -152,14 +168,11 @@ void HelpPanel::buildUi()
          tr("Нажмите «Добавить» в сайдбаре, выберите категорию «Песня» и вставьте текст — он автоматически "
             "разобьётся на слайды по пустым строкам между куплетами.")},
         {tr("Как настроить горячие клавиши?"),
-         tr("Сейчас в показе работают ← / → (слайды), B (чёрный экран) и Пробел (пауза) — список см. в "
-            "Настройки → Горячие клавиши. Их переназначение появится в следующих версиях.")},
+         tr("Откройте Настройки → Горячие клавиши, щёлкните поле нужного действия и нажмите новую клавишу, затем «Сохранить». По умолчанию: ← / → — слайды (пульт-кликер: PageDown / PageUp), Пробел — пауза, F5 — на экран, Esc — завершить показ.")},
         {tr("Как создать резервную копию?"),
-         tr("В сайдбаре откройте «Импорт / Экспорт» и нажмите «Экспортировать» — Gather сохранит базу данных "
-            "и все фото в отдельную папку, которую можно перенести на другой компьютер.")},
+         tr("Настройки → Резервная копия → «Создать сейчас». Там же можно включить автобэкап (ежедневно или еженедельно), выбрать папку для копий и восстановить библиотеку из копии.")},
         {tr("Как работает поиск по Библии?"),
-         tr("В разделе «Стих из Библии» выберите книгу, главу и диапазон стихов на вкладке «По ссылке», либо "
-            "используйте вкладку «По тексту» для поиска по содержимому всей загруженной Библии.")},
+         tr("В разделе «Библия» выберите книгу, главу и стихи на вкладке «По тексту» или найдите слово на вкладке «По поиску». Кнопка с часами рядом со ссылкой открывает недавние места.")},
     };
     for (const auto &[question, answer] : faq)
         faqLayout->addWidget(new FaqRow(question, answer));
@@ -167,43 +180,59 @@ void HelpPanel::buildUi()
 
     auto *supportCard = new QFrame;
     supportCard->setObjectName(QStringLiteral("SupportCard"));
+    // design.pen "Support Card": fill $accent-blue-bg, radius 12. Styled on
+    // the widget itself — the panel-wide rule never reached it.
+    supportCard->setAttribute(Qt::WA_StyledBackground, true);
+    supportCard->setStyleSheet(QStringLiteral("QFrame#SupportCard { background: %1; border-radius: 12px; }").arg(Theme::AccentBlueBg));
     auto *supportLayout = new QHBoxLayout(supportCard);
+    supportLayout->setContentsMargins(22, 22, 22, 22);
+    supportLayout->setSpacing(16);
     auto *supportTextCol = new QVBoxLayout;
     supportTextCol->setSpacing(4);
     auto *supportTitle = new QLabel(tr("Не нашли ответ?"));
-    supportTitle->setStyleSheet(QStringLiteral("font-size: 14.5px; font-weight: 700; color: %1;").arg(Theme::TextLightPrimary));
-    auto *supportDesc = new QLabel(tr("Напишите нам, и мы поможем в течение 24 часов"));
-    supportDesc->setStyleSheet(QStringLiteral("font-size: 12.5px; color: %1;").arg(Theme::TextLightSecondary));
+    supportTitle->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
+    auto *supportDesc = new QLabel(tr("Напишите нам на %1 — поможем в течение 24 часов").arg(QString::fromLatin1(SupportEmail)));
+    supportDesc->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    supportDesc->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(Theme::TextDarkSecondary));
     supportTextCol->addWidget(supportTitle);
     supportTextCol->addWidget(supportDesc);
     supportLayout->addLayout(supportTextCol, 1);
 
     auto *supportButton = new QPushButton(tr("  Написать в поддержку"));
     supportButton->setObjectName(QStringLiteral("SupportButton"));
+    supportButton->setStyleSheet(QStringLiteral("QPushButton#SupportButton { background: %1; border: none; border-radius: 9px; "
+                                                "padding: 11px 18px; font-weight: 600; font-size: 13.5px; color: #ffffff; }")
+                                     .arg(Theme::AccentBlue));
     supportButton->setCursor(Qt::PointingHandCursor);
-    supportButton->setIcon(IconProvider::icon(QStringLiteral("mail"), QColor(Theme::TextDarkPrimary), 15));
+    supportButton->setIcon(IconProvider::icon(QStringLiteral("mail"), QColor(Theme::TextLightPrimary), 15));
+    supportButton->setToolTip(QString::fromLatin1(SupportEmail));
     connect(supportButton, &QPushButton::clicked, this, [this]() {
-        QMessageBox::information(this, tr("Поддержка"),
-            tr("Контакты поддержки появятся здесь позже. Пока опишите проблему автору проекта напрямую."));
+        // Opens the mail program with the address filled in; without one,
+        // the address goes to the clipboard so it can be pasted anywhere.
+        const QString email = QString::fromLatin1(SupportEmail);
+        const QUrl mail(QStringLiteral("mailto:%1?subject=%2").arg(email, QString::fromUtf8(QUrl::toPercentEncoding(tr("Sermon: вопрос")))));
+        if (!QDesktopServices::openUrl(mail)) {
+            QGuiApplication::clipboard()->setText(email);
+            QMessageBox::information(this, tr("Поддержка"),
+                tr("Почта поддержки: %1\nАдрес скопирован — вставьте его в своём почтовом сервисе.").arg(email));
+        }
     });
     supportLayout->addWidget(supportButton);
     layout->addWidget(supportCard);
+    // Without this the blocks shared out the spare height: a huge search box,
+    // the FAQ pushed down and the support card squashed.
+    layout->addStretch();
 
     setStyleSheet(QStringLiteral(R"(
         QWidget#HelpPanel { background: #ffffff; }
-        QFrame#SearchBox { background: #ffffff; border: 1px solid %2; border-radius: 9px; min-height: 40px; }
-        QLineEdit { border: none; background: transparent; font-size: 13px; color: %1; }
+        QFrame#SearchBox { background: #ffffff; border: 1px solid %2; border-radius: 10px; }
+        QLineEdit { border: none; background: transparent; font-size: 14px; color: %1; }
         QFrame#HelpCard { background: %3; border: 1px solid %2; border-radius: 12px; }
         QPushButton#FaqQuestion {
-            text-align: left; border: none; background: transparent; padding: 12px 4px;
+            text-align: left; border: none; background: transparent; padding: 16px 18px;
             font-size: 13.5px; font-weight: 600; color: %1;
         }
-        QFrame#SupportCard { background: %4; border-radius: 14px; }
-        QPushButton#SupportButton {
-            background: #ffffff; border: none; border-radius: 9px; padding: 10px 16px;
-            font-weight: 600; font-size: 13.5px; color: %1;
-        }
-    )").arg(Theme::TextDarkPrimary, Theme::BorderLight, Theme::BgPanel, Theme::BgDark));
+    )").arg(Theme::TextDarkPrimary, Theme::BorderLight, Theme::BgPanel));
 }
 
 #include "HelpPanel.moc"

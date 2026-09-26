@@ -55,7 +55,7 @@ public:
         title->setStyleSheet(QStringLiteral("font-size: 13.5px; font-weight: 600; color: %1;").arg(Theme::TextDarkPrimary));
         layout->addWidget(title);
 
-        auto *sub = new QLabel(tr("Восстанавливает базу данных и фотографии из папки резервной копии Gather"));
+        auto *sub = new QLabel(tr("Восстанавливает базу данных и фотографии из папки резервной копии Sermon"));
         sub->setAlignment(Qt::AlignCenter);
         sub->setWordWrap(true);
         sub->setStyleSheet(QStringLiteral("font-size: 12px; color: %1;").arg(Theme::TextDarkSecondary));

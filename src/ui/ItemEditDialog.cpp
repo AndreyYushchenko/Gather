@@ -1,4 +1,6 @@
 #include "ItemEditDialog.h"
+#include "IconProvider.h"
+#include "Theme.h"
 #include "core/Database.h"
 
 #include <QCheckBox>
@@ -88,6 +90,23 @@ void ItemEditDialog::buildUi()
         form->addWidget(new QLabel(tr("Название песни:")));
         m_songTitle = new QLineEdit;
         form->addWidget(m_songTitle);
+        form->addWidget(new QLabel(tr("Сборник:")));
+        m_songCollection = new QComboBox;
+        m_songCollection->setEditable(true);
+        m_songCollection->setInsertPolicy(QComboBox::NoInsert);
+        m_songCollection->lineEdit()->setPlaceholderText(tr("Выберите сборник или введите новое название"));
+        // The default entry reads "… — по умолчанию" in the list; picking any
+        // entry puts just its name into the field.
+        connect(m_songCollection, &QComboBox::activated, this, [this](int index) {
+            const QString name = m_songCollection->itemData(index).toString();
+            if (name.isEmpty()) { // "Новый сборник…"
+                m_songCollection->setEditText(QString());
+                m_songCollection->lineEdit()->setFocus();
+            } else {
+                m_songCollection->setEditText(name);
+            }
+        });
+        form->addWidget(m_songCollection);
         form->addWidget(new QLabel(tr("№ в сборнике (необязательно, для быстрого поиска по номеру):")));
         m_songNumber = new QLineEdit;
         m_songNumber->setPlaceholderText(tr("например, 120"));
@@ -276,10 +295,10 @@ void ItemEditDialog::downloadYoutubeBackground()
     if (ytDlp.isEmpty()) {
         QMessageBox::information(this, tr("Нужна программа yt-dlp"),
             tr("Чтобы скачивать видео с YouTube прямо здесь, нужна бесплатная утилита yt-dlp "
-               "(она не входит в Gather):\n\n"
+               "(она не входит в Sermon):\n\n"
                "1. Скачайте yt-dlp.exe:\n"
                "   https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe\n"
-               "2. Положите файл в папку C:\\Windows или в папку с Gather.exe.\n"
+               "2. Положите файл в папку C:\\Windows или в папку с Sermon.exe.\n"
                "3. Повторите скачивание здесь.\n\n"
                "Либо проще: скачайте видео вручную любым способом и выберите готовый файл "
                "кнопкой «Выбрать файл...» выше — результат тот же."));
@@ -336,6 +355,7 @@ void ItemEditDialog::applyExisting()
     case ContentType::Song:
         m_songTitle->setText(m_original.title);
         m_songNumber->setText(m_original.refLocation);
+        m_songCollection->setEditText(m_original.refBook);
         m_songText->setPlainText(m_original.text);
         break;
     case ContentType::BibleVerse:
@@ -481,6 +501,19 @@ void ItemEditDialog::setDefaultType(ContentType type)
         m_typeCombo->setCurrentIndex(index);
 }
 
+void ItemEditDialog::setSongCollections(const QStringList &collections, const QString &defaultCollection)
+{
+    const QString current = m_songCollection->currentText();
+    m_songCollection->clear();
+    m_songCollection->addItem(tr("%1 — по умолчанию").arg(defaultCollection), defaultCollection);
+    for (const QString &name : collections)
+        if (name != defaultCollection)
+            m_songCollection->addItem(name, name);
+    m_songCollection->addItem(IconProvider::icon(QStringLiteral("plus"), QColor(Theme::AccentBlue), 15), tr("Новый сборник…"), QString());
+    // A new song gets the default songbook; an edited one keeps its own.
+    m_songCollection->setEditText(m_original.id > 0 ? m_original.refBook : (current.isEmpty() ? defaultCollection : current));
+}
+
 ContentItem ItemEditDialog::item() const
 {
     ContentItem result = m_original;
@@ -490,6 +523,7 @@ ContentItem ItemEditDialog::item() const
     case ContentType::Song:
         result.title = m_songTitle->text().trimmed();
         result.refLocation = m_songNumber->text().trimmed();
+        result.refBook = m_songCollection->currentText().trimmed();
         result.text = m_songText->toPlainText();
         break;
     case ContentType::BibleVerse:

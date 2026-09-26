@@ -16,6 +16,13 @@ enum class ContentType {
 // Background shown behind the slide text for Song/BibleVerse/Announcement
 // items (a Photo item's own image is already the whole slide, so it never
 // has one of these).
+// Announcement only: how the slide text is aligned on the output.
+enum class TextAlign {
+    Left,
+    Center,
+    Right
+};
+
 enum class BackgroundType {
     None,
     Photo,
@@ -25,6 +32,14 @@ enum class BackgroundType {
 QString contentTypeToDbString(ContentType type);
 ContentType contentTypeFromDbString(const QString &value);
 QString contentTypeDisplayName(ContentType type);
+
+// Songs: what each slide is — "Куплет N", "Припев", "Бридж" or "" — from
+// its "Куплет 2"/"Припев" label when it has one, otherwise a slide that
+// repeats is the chorus and the rest are numbered verses.
+QStringList songSlideLabels(const QStringList &slides);
+// ChordPro-style inline chords ("[Am]слова").
+bool hasChords(const QString &text);
+QString stripChords(const QString &text);
 
 QString backgroundTypeToDbString(BackgroundType type);
 BackgroundType backgroundTypeFromDbString(const QString &value);
@@ -49,6 +64,12 @@ struct ContentItem {
     BackgroundType backgroundType = BackgroundType::None;
     QString backgroundPath;
 
+    // Announcement only ("Редактирование объявления"): title is the big
+    // heading, `text` holds the subtitle line and then the extra text.
+    TextAlign textAlign = TextAlign::Center;
+    int textSize = 0;       // -1 smaller, 0 normal, +1 larger
+    QString category;
+
     bool favorite = false;
     QString notes;       // free-form operator notes, any category
 
@@ -56,6 +77,8 @@ struct ContentItem {
 
     // Splits song/verse text into slides on blank lines.
     QStringList slides() const;
+    // Presentation pagination leaves the saved lyrics intact.
+    QStringList presentationSlides() const;
 
     QString displayTitle() const;
 };

@@ -2,7 +2,6 @@
 #include "IconProvider.h"
 #include "Theme.h"
 
-#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -10,7 +9,9 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPixmap>
+#include <QStyledItemDelegate>
 #include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -28,114 +29,99 @@ QString ruCount(int n, const QString &one, const QString &few, const QString &ma
 }
 }
 
-// Not in an anonymous namespace: moc cannot generate metaobject code for
-// Q_OBJECT classes declared inside one.
-class LibraryRowWidget : public QFrame {
-    Q_OBJECT
-public:
-    explicit LibraryRowWidget(const ContentItem &item, bool gridMode, QWidget *parent = nullptr)
-        : QFrame(parent)
-        , m_id(item.id)
-        , m_favorite(item.favorite)
-        , m_gridMode(gridMode)
-    {
-        setFrameShape(QFrame::NoFrame);
+namespace {
 
-        if (gridMode) {
-            setFixedSize(158, 117);
-            auto *layout = new QVBoxLayout(this);
-            layout->setContentsMargins(6, 6, 6, 6);
-            layout->setSpacing(6);
-
-            auto *thumb = new QLabel;
-            thumb->setFixedSize(146, 82);
-            thumb->setAlignment(Qt::AlignCenter);
-            thumb->setStyleSheet(QStringLiteral("background: %1; border-radius: 8px;").arg(Theme::BgWhite));
-            if (!item.imagePath.isEmpty() && QFileInfo::exists(item.imagePath)) {
-                const QPixmap source(item.imagePath);
-                thumb->setPixmap(source.scaled(146, 82, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation));
-            } else {
-                thumb->setPixmap(IconProvider::pixmap(QStringLiteral("image"), QColor(Theme::TextDarkSecondary), 22));
-            }
-            layout->addWidget(thumb);
-
-            m_titleLabel = new QLabel(item.displayTitle());
-            m_titleLabel->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 12.5px;"));
-            m_titleLabel->setAlignment(Qt::AlignLeft);
-            layout->addWidget(m_titleLabel);
-            setSelected(false);
-            return;
-        }
-
-        auto *layout = new QHBoxLayout(this);
-        layout->setContentsMargins(12, 10, 12, 10);
-        layout->setSpacing(10);
-
-        auto *textCol = new QVBoxLayout;
-        textCol->setSpacing(2);
-        m_titleLabel = new QLabel(item.displayTitle());
-        m_titleLabel->setStyleSheet(QStringLiteral("font-weight: 600; font-size: 14px;"));
-        auto *subtitle = new QLabel(contentTypeDisplayName(item.type));
-        subtitle->setStyleSheet(QStringLiteral("color: %1; font-size: 12px;").arg(Theme::TextDarkSecondary));
-        textCol->addWidget(m_titleLabel);
-        textCol->addWidget(subtitle);
-        layout->addLayout(textCol, 1);
-
-        m_starButton = new QPushButton;
-        m_starButton->setFlat(true);
-        m_starButton->setCursor(Qt::PointingHandCursor);
-        m_starButton->setFixedSize(24, 24);
-        m_starButton->setIconSize(QSize(17, 17));
-        m_starButton->setStyleSheet(QStringLiteral("border: none; background: transparent;"));
-        connect(m_starButton, &QPushButton::clicked, this, [this]() { emit starClicked(m_id); });
-        layout->addWidget(m_starButton);
-
-        setSelected(false);
-    }
-
-    void setSelected(bool selected)
-    {
-        if (m_selectionApplied && m_selected == selected)
-            return;
-        m_selected = selected;
-        m_selectionApplied = true;
-        // Scoped to LibraryRowWidget: an unscoped rule would cascade its
-        // border-radius down onto the child QLabels too.
-        setStyleSheet(selected
-                          ? QStringLiteral("LibraryRowWidget { background: %1; border-radius: 9px; }").arg(Theme::AccentBlueBg)
-                          : QStringLiteral("LibraryRowWidget { background: transparent; border-radius: 9px; }"));
-        m_titleLabel->setStyleSheet(QStringLiteral("font-weight: 600; font-size: %1px; color: %2;")
-                                         .arg(m_gridMode ? QStringLiteral("12.5") : QStringLiteral("14"),
-                                              selected ? Theme::AccentBlue : Theme::TextDarkPrimary));
-        if (m_starButton) {
-            const QColor starColor(selected ? Theme::AccentBlue : Theme::TextDarkSecondary);
-            m_starButton->setIcon(IconProvider::icon(QStringLiteral("star"), starColor, 17, m_favorite));
-        }
-    }
-
-signals:
-    void clicked(int id);
-    void starClicked(int id);
-
-protected:
-    void mousePressEvent(QMouseEvent *) override { emit clicked(m_id); }
-
-private:
-    int m_id;
-    bool m_favorite;
-    bool m_gridMode;
-    bool m_selected = false;
-    bool m_selectionApplied = false;
-    QLabel *m_titleLabel = nullptr;
-    QPushButton *m_starButton = nullptr;
+enum RowRole {
+    IdRole = Qt::UserRole,
+    SelectedRole,
+    FavoriteRole,
+    NumberRole,
+    SubtitleRole,
 };
+
+constexpr int RowHeight = 54; // design.pen "Song Row": 54 tall, 2 apart
+
+// Paints one library row (number, title, type, star) straight onto the
+// list — no child widgets per row. With a real QFrame + labels + button per
+// row, opening Песни (770 songs) took seconds; painting only the visible
+// rows makes it instant regardless of library size.
+class LibraryRowDelegate : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    static QRect starRect(const QRect &row)
+    {
+        return QRect(row.right() - 12 - 24 + 1, row.center().y() - 12, 24, 24);
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &) const override
+    {
+        return QSize(option.rect.width(), RowHeight);
+    }
+
+    void paint(QPainter *painter, const QStyleOptionViewItem &option, const QModelIndex &index) const override
+    {
+        const bool selected = index.data(SelectedRole).toBool();
+        const bool favorite = index.data(FavoriteRole).toBool();
+        const QString number = index.data(NumberRole).toString();
+        const QRect row = option.rect;
+
+        painter->save();
+        painter->setRenderHint(QPainter::Antialiasing);
+        if (selected) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(Theme::AccentBlueBg));
+            painter->drawRoundedRect(row, Theme::radius(9), Theme::radius(9));
+        }
+
+        QFont bold = option.font;
+        bold.setPixelSize(14);
+        bold.setWeight(QFont::DemiBold);
+        const QFontMetrics boldMetrics(bold);
+        const QColor accent(Theme::AccentBlue);
+        int left = row.left() + 12;
+        const int titleTop = row.top() + 10;
+
+        if (!number.isEmpty()) {
+            const QString numberText = number + QStringLiteral(".");
+            painter->setFont(bold);
+            painter->setPen(selected ? accent : QColor(Theme::TextDarkSecondary));
+            painter->drawText(QRect(left, row.top(), boldMetrics.horizontalAdvance(numberText) + 2, row.height()),
+                              Qt::AlignLeft | Qt::AlignVCenter, numberText);
+            left += boldMetrics.horizontalAdvance(numberText) + 10;
+        }
+
+        const int textRight = starRect(row).left() - 10;
+        painter->setFont(bold);
+        painter->setPen(selected ? accent : QColor(Theme::TextDarkPrimary));
+        painter->drawText(QRect(left, titleTop, textRight - left, boldMetrics.height()), Qt::AlignLeft | Qt::AlignVCenter,
+                          boldMetrics.elidedText(index.data(Qt::DisplayRole).toString(), Qt::ElideRight, textRight - left));
+
+        QFont small = option.font;
+        small.setPixelSize(12);
+        painter->setFont(small);
+        painter->setPen(QColor(Theme::TextDarkSecondary));
+        painter->drawText(QRect(left, titleTop + boldMetrics.height() + 2, textRight - left, QFontMetrics(small).height()),
+                          Qt::AlignLeft | Qt::AlignVCenter, index.data(SubtitleRole).toString());
+
+        const QRect star = starRect(row);
+        painter->drawPixmap(star.center().x() - 8, star.center().y() - 8,
+                            IconProvider::pixmap(QStringLiteral("star"), selected ? accent : QColor(Theme::TextDarkSecondary), 17, favorite));
+        painter->restore();
+    }
+};
+
+} // namespace
 
 LibraryListPanel::LibraryListPanel(QWidget *parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("LibraryListPanel"));
     setAttribute(Qt::WA_StyledBackground, true);
-    setFixedWidth(360);
+    // 360 is this panel's *maximum* width (its design.pen size), not fixed —
+    // see DisplayControlPanel's matching comment for why.
+    setMinimumWidth(280);
+    setMaximumWidth(360);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 18, 16, 18);
@@ -144,8 +130,8 @@ LibraryListPanel::LibraryListPanel(QWidget *parent)
     auto *searchRow = new QHBoxLayout;
     searchRow->setSpacing(10);
     m_search = new QLineEdit;
+    m_search->setObjectName(QStringLiteral("SearchField")); // Ctrl+F (Горячие клавиши → Поиск)
     m_search->setPlaceholderText(tr("Поиск по названию или тексту..."));
-    m_search->setObjectName(QStringLiteral("SearchBox"));
     m_search->addAction(IconProvider::icon(QStringLiteral("search"), QColor(Theme::TextDarkSecondary), 16),
                          QLineEdit::LeadingPosition);
     searchRow->addWidget(m_search, 1);
@@ -204,6 +190,18 @@ LibraryListPanel::LibraryListPanel(QWidget *parent)
     m_list->setFrameShape(QFrame::NoFrame);
     m_list->setSelectionMode(QAbstractItemView::NoSelection);
     m_list->setFocusPolicy(Qt::NoFocus);
+    // Qt's default (ScrollPerItem) jumps a whole row per wheel notch, so
+    // row widgets (title, star, ...) appear to "teleport" between fixed
+    // positions instead of gliding together — ScrollPerPixel moves the
+    // whole row, star included, in the same smooth motion as everything else.
+    m_list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    // This list only ever scrolls vertically — rows/tiles wrap, they don't
+    // run off sideways — so a horizontal scrollbar should never appear.
+    m_list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_list->setUniformItemSizes(true);
+    m_list->setItemDelegate(new LibraryRowDelegate(m_list));
+    m_list->viewport()->setCursor(Qt::PointingHandCursor);
+    m_list->viewport()->installEventFilter(this);
     layout->addWidget(m_list, 1);
 
     m_searchDebounce = new QTimer(this);
@@ -220,8 +218,8 @@ LibraryListPanel::LibraryListPanel(QWidget *parent)
     });
 
     setStyleSheet(QStringLiteral(R"(
-        QWidget#LibraryListPanel { background: %1; border-right: 1px solid %2; }
-        QLineEdit#SearchBox {
+        QWidget#LibraryListPanel { background: %1; border: 1px solid %2; border-radius: 14px; }
+        QLineEdit#SearchField {
             background: #ffffff; border: 1px solid %2; border-radius: 9px;
             padding: 9px 12px; font-size: 13px; color: %3;
         }
@@ -235,7 +233,9 @@ LibraryListPanel::LibraryListPanel(QWidget *parent)
         }
         QPushButton#SortButton::menu-indicator { image: none; width: 0; }
         QListWidget#LibraryList { background: transparent; border: none; }
-        QListWidget#LibraryList::item { border: none; }
+        QListWidget#LibraryList { outline: none; }
+        QListWidget#LibraryList::item { background: transparent; border: none; outline: none; }
+        QListWidget#LibraryList::item:hover, QListWidget#LibraryList::item:selected, QListWidget#LibraryList::item:focus { background: transparent; outline: none; }
     )").arg(Theme::BgPanel, Theme::BorderLight, Theme::TextDarkPrimary, Theme::TextDarkSecondary));
 }
 
@@ -261,37 +261,16 @@ void LibraryListPanel::setItems(const QList<ContentItem> &items)
 
     const std::optional<int> previousSelection = selectedItemId();
 
-    const bool gridMode = m_category == ContentType::Photo;
-    if (gridMode) {
-        m_list->setViewMode(QListView::IconMode);
-        m_list->setFlow(QListView::LeftToRight);
-        m_list->setWrapping(true);
-        m_list->setResizeMode(QListView::Adjust);
-        m_list->setGridSize(QSize(164, 123));
-        m_list->setMovement(QListView::Static);
-    } else {
-        m_list->setViewMode(QListView::ListMode);
-        m_list->setFlow(QListView::TopToBottom);
-        m_list->setWrapping(false);
-        m_list->setGridSize(QSize());
-    }
-
-    // Rebuilding can mean hundreds of real widgets; without this the list
-    // repaints/relayouts after every single addItem(), which is the other
-    // big contributor to the lag (on top of the per-keystroke rebuilds the
-    // search debounce above avoids).
     m_list->setUpdatesEnabled(false);
     m_list->clear();
     for (const ContentItem &item : m_items) {
-        auto *row = new LibraryRowWidget(item, gridMode);
-        connect(row, &LibraryRowWidget::clicked, this, [this](int id) { selectItemById(id); });
-        connect(row, &LibraryRowWidget::starClicked, this, &LibraryListPanel::favoriteToggled);
-
-        auto *listItem = new QListWidgetItem;
-        listItem->setSizeHint(row->sizeHint());
-        listItem->setData(Qt::UserRole, item.id);
+        const bool hasNumber = item.type == ContentType::Song && !item.refLocation.isEmpty();
+        auto *listItem = new QListWidgetItem(hasNumber ? item.title : item.displayTitle());
+        listItem->setData(IdRole, item.id);
+        listItem->setData(FavoriteRole, item.favorite);
+        listItem->setData(NumberRole, hasNumber ? item.refLocation : QString());
+        listItem->setData(SubtitleRole, contentTypeDisplayName(item.type));
         m_list->addItem(listItem);
-        m_list->setItemWidget(listItem, row);
     }
     m_list->setUpdatesEnabled(true);
 
@@ -303,12 +282,28 @@ void LibraryListPanel::setItems(const QList<ContentItem> &items)
         emit itemSelected(std::nullopt);
 }
 
+void LibraryListPanel::setItemFavorite(int id, bool favorite)
+{
+    for (ContentItem &item : m_items) {
+        if (item.id == id) {
+            item.favorite = favorite;
+            break;
+        }
+    }
+    for (int i = 0; i < m_list->count(); ++i) {
+        QListWidgetItem *listItem = m_list->item(i);
+        if (listItem->data(IdRole).toInt() == id) {
+            listItem->setData(FavoriteRole, favorite);
+            break;
+        }
+    }
+}
+
 std::optional<int> LibraryListPanel::selectedItemId() const
 {
     for (int i = 0; i < m_list->count(); ++i) {
-        auto *row = qobject_cast<LibraryRowWidget *>(m_list->itemWidget(m_list->item(i)));
-        if (row && m_list->item(i)->data(Qt::UserRole + 1).toBool())
-            return m_list->item(i)->data(Qt::UserRole).toInt();
+        if (m_list->item(i)->data(SelectedRole).toBool())
+            return m_list->item(i)->data(IdRole).toInt();
     }
     return std::nullopt;
 }
@@ -318,17 +313,34 @@ void LibraryListPanel::selectItemById(int id)
     bool found = false;
     for (int i = 0; i < m_list->count(); ++i) {
         QListWidgetItem *listItem = m_list->item(i);
-        auto *row = qobject_cast<LibraryRowWidget *>(m_list->itemWidget(listItem));
-        const bool matches = listItem->data(Qt::UserRole).toInt() == id;
-        if (row)
-            row->setSelected(matches);
-        listItem->setData(Qt::UserRole + 1, matches);
+        const bool matches = listItem->data(IdRole).toInt() == id;
+        if (listItem->data(SelectedRole).toBool() != matches)
+            listItem->setData(SelectedRole, matches);
         if (matches) {
             found = true;
             m_list->scrollToItem(listItem);
         }
     }
     emit itemSelected(found ? std::optional<int>(id) : std::nullopt);
+}
+
+bool LibraryListPanel::eventFilter(QObject *watched, QEvent *event)
+{
+    // Row clicks: the star toggles the favorite, anywhere else selects.
+    if (watched == m_list->viewport() && event->type() == QEvent::MouseButtonPress) {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            if (QListWidgetItem *item = m_list->itemAt(mouse->position().toPoint())) {
+                const int id = item->data(IdRole).toInt();
+                if (LibraryRowDelegate::starRect(m_list->visualItemRect(item)).contains(mouse->position().toPoint()))
+                    emit favoriteToggled(id);
+                else
+                    selectItemById(id);
+                return true;
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 QString LibraryListPanel::searchText() const
@@ -341,4 +353,3 @@ SortOrder LibraryListPanel::sortOrder() const
     return m_sortOrder;
 }
 
-#include "LibraryListPanel.moc"

@@ -23,6 +23,8 @@ public:
 
     ContentItem item() const;
     void setDefaultType(ContentType type);
+    // Song page "Сборник": the songbooks to offer and the one a new song gets.
+    void setSongCollections(const QStringList &collections, const QString &defaultCollection);
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
@@ -51,6 +53,7 @@ private:
     // Song page
     QLineEdit *m_songTitle = nullptr;
     QLineEdit *m_songNumber = nullptr;
+    class QComboBox *m_songCollection = nullptr;
     QTextEdit *m_songText = nullptr;
 
     // Bible verse page

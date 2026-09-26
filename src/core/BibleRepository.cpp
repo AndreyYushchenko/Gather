@@ -1,14 +1,55 @@
 #include "BibleRepository.h"
+#include "AppSettings.h"
 
+#include <QRegularExpression>
+#include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QVariant>
 
 QString BibleRepository::defaultTranslation() const
 {
-    QSqlQuery query(QStringLiteral("SELECT translation FROM bible_books ORDER BY translation LIMIT 1"));
-    if (query.next())
-        return query.value(0).toString();
-    return {};
+    const QStringList all = translations();
+    const QString chosen = AppSettings::value(AppSettings::BibleTranslation).toString();
+    if (all.contains(chosen))
+        return chosen;
+    return all.value(0);
+}
+
+QStringList BibleRepository::translations() const
+{
+    QStringList result;
+    QSqlQuery query(QStringLiteral("SELECT DISTINCT translation FROM bible_books ORDER BY translation"));
+    while (query.next())
+        result << query.value(0).toString();
+    return result;
+}
+
+QList<BibleRepository::TranslationInfo> BibleRepository::translationInfos() const
+{
+    QList<TranslationInfo> result;
+    QSqlQuery query(QStringLiteral(
+        "SELECT b.translation, COUNT(*), (SELECT COUNT(*) FROM bible_verses v WHERE v.translation = b.translation) "
+        "FROM bible_books b GROUP BY b.translation ORDER BY b.translation"));
+    while (query.next())
+        result.append({query.value(0).toString(), query.value(1).toInt(), query.value(2).toInt()});
+    return result;
+}
+
+bool BibleRepository::removeTranslation(const QString &translation) const
+{
+    QSqlDatabase db = QSqlDatabase::database();
+    db.transaction();
+    QSqlQuery verses;
+    verses.prepare(QStringLiteral("DELETE FROM bible_verses WHERE translation = :t"));
+    verses.bindValue(QStringLiteral(":t"), translation);
+    QSqlQuery books;
+    books.prepare(QStringLiteral("DELETE FROM bible_books WHERE translation = :t"));
+    books.bindValue(QStringLiteral(":t"), translation);
+    if (!verses.exec() || !books.exec()) {
+        db.rollback();
+        return false;
+    }
+    return db.commit();
 }
 
 QList<BibleBook> BibleRepository::books(const QString &translation) const
@@ -30,16 +71,6 @@ QList<BibleBook> BibleRepository::books(const QString &translation) const
         result << book;
     }
     return result;
-}
-
-int BibleRepository::totalVerseCount(const QString &translation) const
-{
-    QSqlQuery query;
-    query.prepare(QStringLiteral("SELECT COUNT(*) FROM bible_verses WHERE translation = :t"));
-    query.bindValue(QStringLiteral(":t"), translation);
-    if (!query.exec() || !query.next())
-        return 0;
-    return query.value(0).toInt();
 }
 
 int BibleRepository::verseCount(const QString &translation, int bookNum, int chapter) const
@@ -108,4 +139,28 @@ QList<BibleSearchHit> BibleRepository::search(const QString &translation, const 
         result << hit;
     }
     return result;
+}
+
+QString BibleRepository::abbreviation(int bookNum, const QString &fullName)
+{
+    // Books 1–66 in the usual Protestant order.
+    static const char *const ukrainian[] = {
+        "Бут.", "Вих.", "Лев.", "Чис.", "Повт.", "ІсН.", "Суд.", "Рут", "1 Сам.", "2 Сам.", "1 Цар.", "2 Цар.", "1 Хр.", "2 Хр.",
+        "Езд.", "Неєм.", "Ест.", "Йов", "Пс.", "Пр.", "Екл.", "Пісн.", "Іс.", "Єр.", "Плач", "Єз.", "Дан.", "Ос.", "Йоїл", "Ам.",
+        "Овд.", "Йон.", "Мих.", "Наум", "Ав.", "Соф.", "Ог.", "Зах.", "Мал.", "Мт.", "Мр.", "Лк.", "Ів.", "Дії", "Рим.", "1 Кор.",
+        "2 Кор.", "Гал.", "Еф.", "Флп.", "Кол.", "1 Сол.", "2 Сол.", "1 Тим.", "2 Тим.", "Тит", "Флм.", "Євр.", "Як.", "1 Пет.",
+        "2 Пет.", "1 Ів.", "2 Ів.", "3 Ів.", "Юд.", "Об.",
+    };
+    static const char *const russian[] = {
+        "Быт.", "Исх.", "Лев.", "Чис.", "Втор.", "Нав.", "Суд.", "Руфь", "1 Цар.", "2 Цар.", "3 Цар.", "4 Цар.", "1 Пар.", "2 Пар.",
+        "Езд.", "Неем.", "Есф.", "Иов", "Пс.", "Притч.", "Еккл.", "Песн.", "Ис.", "Иер.", "Плач", "Иез.", "Дан.", "Ос.", "Иоил.", "Ам.",
+        "Авд.", "Ион.", "Мих.", "Наум", "Авв.", "Соф.", "Агг.", "Зах.", "Мал.", "Мф.", "Мк.", "Лк.", "Ин.", "Деян.", "Рим.", "1 Кор.",
+        "2 Кор.", "Гал.", "Еф.", "Флп.", "Кол.", "1 Фес.", "2 Фес.", "1 Тим.", "2 Тим.", "Тит", "Флм.", "Евр.", "Иак.", "1 Пет.",
+        "2 Пет.", "1 Ин.", "2 Ин.", "3 Ин.", "Иуд.", "Откр.",
+    };
+    if (bookNum < 1 || bookNum > 66)
+        return fullName;
+    static const QRegularExpression ukrainianLetters(QStringLiteral("[іїєґІЇЄҐ']"));
+    const bool isUkrainian = fullName.contains(ukrainianLetters) || fullName.startsWith(QStringLiteral("Від "));
+    return QString::fromUtf8(isUkrainian ? ukrainian[bookNum - 1] : russian[bookNum - 1]);
 }

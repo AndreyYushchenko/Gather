@@ -21,11 +21,17 @@ public:
 
     void setCategory(ContentType type);
     void setItems(const QList<ContentItem> &items);
+    // Updates one row's star in place instead of tearing down and rebuilding
+    // every row widget in the list just to flip a single favorite flag.
+    void setItemFavorite(int id, bool favorite);
     std::optional<int> selectedItemId() const;
     void selectItemById(int id);
     bool favoritesOnly() const { return m_favoritesOnly; }
     QString searchText() const;
     SortOrder sortOrder() const;
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 signals:
     void filtersChanged();

@@ -29,6 +29,15 @@ public:
 
     // Number of (non-expired) items per category, for the sidebar badges.
     QMap<ContentType, int> categoryCounts() const;
+    // Names of the songbooks songs were imported from (items.ref_book on
+    // songs), sorted.
+    QStringList songCollections() const;
+    // Every songbook with its number of songs; "" = songs without one.
+    QList<QPair<QString, int>> songCollectionCounts() const;
+    // Deletes a songbook's songs (and their places in playlists).
+    bool removeSongCollection(const QString &collection) const;
+    // A songbook's songs in songbook order (by number, then title).
+    QList<ContentItem> songsInCollection(const QString &collection) const;
 
     // On success, sets item.id and item.createdAt.
     bool add(ContentItem &item) const;
@@ -37,6 +46,6 @@ public:
     bool setFavorite(int id, bool favorite) const;
     bool setNotes(int id, const QString &notes) const;
 
-private:
+    // Also used by PlaylistRepository for its joined item rows.
     static ContentItem fromRecord(QSqlQuery &query);
 };

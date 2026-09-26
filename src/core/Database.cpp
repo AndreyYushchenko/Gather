@@ -10,7 +10,9 @@
 
 QString Database::dataDir()
 {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    const QString isolated = qEnvironmentVariable("SERMON_PROFILE_DIR");
+    const QString dir = !qEnvironmentVariable("SERMON_PROFILE").isEmpty() && !isolated.isEmpty()
+        ? isolated : QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
     QDir().mkpath(dir);
     return dir;
 }
@@ -39,7 +41,7 @@ QString Database::videosDir()
 bool Database::open()
 {
     QSqlDatabase db = QSqlDatabase::addDatabase(QStringLiteral("QSQLITE"));
-    db.setDatabaseName(dataDir() + QStringLiteral("/gather.db"));
+    db.setDatabaseName(dataDir() + QStringLiteral("/sermon.db"));
 
     if (!db.open()) {
         qWarning() << "Failed to open database:" << db.lastError().text();
@@ -91,6 +93,9 @@ bool Database::ensureSchema()
     if (!existingColumns.contains(QStringLiteral("background_path")))
         query.exec(QStringLiteral("ALTER TABLE items ADD COLUMN background_path TEXT NOT NULL DEFAULT ''"));
 
+    if (!existingColumns.contains(QStringLiteral("style")))
+        query.exec(QStringLiteral("ALTER TABLE items ADD COLUMN style TEXT NOT NULL DEFAULT ''"));
+
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_items_type ON items(type)"));
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_items_title ON items(title)"));
 
@@ -135,6 +140,26 @@ bool Database::ensureSchema()
         )
     )"));
     query.exec(QStringLiteral("CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist ON playlist_items(playlist_id, position)"));
+
+    // Songs imported from a numbered songbook before collections existed
+    // join the default one, so "Активный сборник" has something to pick.
+    query.exec(QStringLiteral("UPDATE items SET ref_book = 'Основной сборник' "
+                              "WHERE type = 'song' AND ref_book = '' AND ref_location <> ''"));
+
+    // Added with the redesigned Playlists screen.
+    const auto addColumn = [](const QString &table, const QString &column, const QString &definition) {
+        QSqlQuery columns(QStringLiteral("PRAGMA table_info(%1)").arg(table));
+        while (columns.next()) {
+            if (columns.value(QStringLiteral("name")).toString() == column)
+                return;
+        }
+        QSqlQuery().exec(QStringLiteral("ALTER TABLE %1 ADD COLUMN %2 %3").arg(table, column, definition));
+    };
+    addColumn(QStringLiteral("playlists"), QStringLiteral("description"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    addColumn(QStringLiteral("playlists"), QStringLiteral("cover_path"), QStringLiteral("TEXT NOT NULL DEFAULT ''"));
+    // Planned length of one entry in seconds; 0 = not set (a video's own
+    // length is used instead).
+    addColumn(QStringLiteral("playlist_items"), QStringLiteral("duration_sec"), QStringLiteral("INTEGER NOT NULL DEFAULT 0"));
 
     return true;
 }

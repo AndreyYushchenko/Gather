@@ -1,4 +1,6 @@
 #include "ContentItem.h"
+#include "AppSettings.h"
+#include "ui/DisplaySettings.h"
 
 #include <QObject>
 #include <QRegularExpression>
@@ -64,7 +66,55 @@ QStringList ContentItem::slides() const
     }
     if (result.isEmpty() && !text.trimmed().isEmpty())
         result << text.trimmed();
-    return result;
+
+    // "Автоматически определять припев" (Настройки → Песни и сборники).
+    if (type != ContentType::Song || !AppSettings::value(AppSettings::AutoChorus).toBool())
+        return result;
+
+    // Songs written as "Куплет 1 / Припев / Куплет 2 / Куплет 3" only spell
+    // the chorus out once, but it's meant to repeat after every verse — so
+    // insert it after each "Куплет" slide that isn't already followed by it.
+    const QString chorusLabel1 = QStringLiteral("Припев");
+    const QString chorusLabel2 = QStringLiteral("Приспів");
+    const QString verseLabel = QStringLiteral("Куплет");
+
+    QString chorus;
+    for (const QString &slide : result) {
+        if (slide.startsWith(chorusLabel1, Qt::CaseInsensitive) || slide.startsWith(chorusLabel2, Qt::CaseInsensitive)) {
+            chorus = slide;
+            break;
+        }
+    }
+    if (chorus.isEmpty())
+        return result;
+
+    QStringList withChorus;
+    for (int i = 0; i < result.size(); ++i) {
+        const QString &slide = result.at(i);
+        withChorus << slide;
+        if (slide.startsWith(verseLabel, Qt::CaseInsensitive)) {
+            const bool nextIsChorus = (i + 1 < result.size()) && result.at(i + 1) == chorus;
+            if (!nextIsChorus)
+                withChorus << chorus;
+        }
+    }
+    return withChorus;
+}
+
+QStringList ContentItem::presentationSlides() const
+{
+    QStringList pages = slides();
+    if (type == ContentType::Song
+        && !AppSettings::value(DisplaySettings::styleKey(type, QStringLiteral("separateChorus"))).toBool()) {
+        QStringList combined;
+        static const QRegularExpression chorus(QStringLiteral(R"(^\s*(Припев|Приспів|Chorus)[:.\s])"), QRegularExpression::CaseInsensitiveOption);
+        for (const QString &page : pages) {
+            if (!combined.isEmpty() && chorus.match(page).hasMatch()) combined.last() += QLatin1Char('\n') + page;
+            else combined << page;
+        }
+        pages = combined;
+    }
+    return DisplaySettings::splitTextSlides(type, pages);
 }
 
 QString ContentItem::displayTitle() const
@@ -80,4 +130,56 @@ QString ContentItem::displayTitle() const
     default:
         return title;
     }
+}
+
+namespace {
+
+const QRegularExpression &chordPattern()
+{
+    // [C], [Am7], [F#m/C#], [Hsus4] … — not arbitrary bracketed words.
+    static const QRegularExpression pattern(QStringLiteral(R"(\[([A-H][#b]?(?:m|maj|min|dim|aug|sus|add)?\d*(?:sus\d|add\d)?(?:/[A-H][#b]?)?)\])"));
+    return pattern;
+}
+
+} // namespace
+
+bool hasChords(const QString &text)
+{
+    return chordPattern().match(text).hasMatch();
+}
+
+QString stripChords(const QString &text)
+{
+    QString result = text;
+    result.remove(chordPattern());
+    return result;
+}
+
+QStringList songSlideLabels(const QStringList &slides)
+{
+    static const QRegularExpression verse(QStringLiteral(R"(^\s*(Куплет|Verse)\.?\s*(\d+)?)"),
+                                          QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption);
+    static const QRegularExpression chorus(QStringLiteral(R"(^\s*(Припев|Приспів|Chorus))"),
+                                           QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption);
+    static const QRegularExpression bridge(QStringLiteral(R"(^\s*(Бридж|Bridge))"),
+                                           QRegularExpression::CaseInsensitiveOption | QRegularExpression::UseUnicodePropertiesOption);
+    QStringList labels;
+    int verseNumber = 0;
+    for (const QString &slide : slides) {
+        const QString firstLine = slide.section(QLatin1Char('\n'), 0, 0);
+        const QRegularExpressionMatch verseMatch = verse.match(firstLine);
+        if (verseMatch.hasMatch()) {
+            verseNumber = verseMatch.captured(2).isEmpty() ? verseNumber + 1 : verseMatch.captured(2).toInt();
+            labels << QObject::tr("Куплет %1").arg(verseNumber);
+        } else if (chorus.match(firstLine).hasMatch() || (slides.count(slide) > 1 && !slide.trimmed().isEmpty())) {
+            labels << QObject::tr("Припев");
+        } else if (bridge.match(firstLine).hasMatch()) {
+            labels << QObject::tr("Бридж");
+        } else if (slide.trimmed().isEmpty()) {
+            labels << QString();
+        } else {
+            labels << QObject::tr("Куплет %1").arg(++verseNumber);
+        }
+    }
+    return labels;
 }

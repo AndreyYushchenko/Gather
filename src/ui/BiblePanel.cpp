@@ -1,24 +1,54 @@
 #include "BiblePanel.h"
+#include "DisplaySettings.h"
+#include "ChevronButton.h"
 #include "IconProvider.h"
 #include "Theme.h"
+#include "core/AppSettings.h"
 
+#include <QAbstractButton>
 #include <QButtonGroup>
-#include <QCheckBox>
 #include <QComboBox>
+#include <QCompleter>
+#include <QMenu>
+#include <QSettings>
+#include <QStringListModel>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QStackedWidget>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 
 namespace {
 
-constexpr int TabByRef = 0;
-constexpr int TabByText = 1;
+// QComboBox#FieldBox reserves 12px left / 30px right padding for the
+// dropdown arrow (see the stylesheet below). Long item text (a long
+// translation or book name) needs to be elided to fit *inside* that
+// safe width ourselves: the native Windows style's own combobox label
+// painting doesn't respect a custom QSS drop-down's reserved width at
+// all here, so an unelided long string paints straight across the full
+// box, over the arrow, with no "…" at all.
+QString elideForFieldBox(QComboBox *combo, const QString &text, int boxWidth)
+{
+    // Measuring with a hand-built QFont (even matching family/size/weight
+    // on paper) does not reliably match what the widget actually paints —
+    // confirmed by testing: it silently produced a string ~40px too wide.
+    // ensurePolished() forces the pending QSS to resolve immediately, so
+    // combo->fontMetrics() afterward reflects the exact font that will
+    // paint this text, not an approximation of it.
+    combo->ensurePolished();
+    const QFontMetrics metrics = combo->fontMetrics();
+    return metrics.elidedText(text, Qt::ElideRight, boxWidth - 46);
+}
+
+constexpr int TabReference = 0;
+constexpr int TabSearch = 1;
 
 QPushButton *makeOutlineButton(const QString &iconName, const QString &text)
 {
@@ -33,19 +63,32 @@ QPushButton *makeOutlineButton(const QString &iconName, const QString &text)
     return button;
 }
 
-QPushButton *makeOutlineIconButton(const QString &iconName, const QString &tooltip)
+QPushButton *makePrimaryButton(const QString &iconName, const QString &text)
+{
+    auto *button = new QPushButton;
+    button->setObjectName(QStringLiteral("PrimaryButton"));
+    button->setCursor(Qt::PointingHandCursor);
+    button->setIcon(IconProvider::icon(iconName, QColor(Theme::TextLightPrimary), 15));
+    button->setIconSize(QSize(15, 15));
+    button->setText(text);
+    return button;
+}
+
+QPushButton *makeOutlineIconButton(const QString &iconName, const QString &tooltip,
+                                    const QColor &iconColor = QColor(Theme::TextDarkPrimary), int iconSize = 15)
 {
     auto *button = new QPushButton;
     button->setObjectName(QStringLiteral("OutlineIconButton"));
     button->setCursor(Qt::PointingHandCursor);
     button->setFixedSize(38, 38);
-    button->setIcon(IconProvider::icon(iconName, QColor(Theme::TextDarkPrimary), 15));
-    button->setIconSize(QSize(15, 15));
+    button->setIcon(IconProvider::icon(iconName, iconColor, iconSize));
+    button->setIconSize(QSize(iconSize, iconSize));
     button->setToolTip(tooltip);
     return button;
 }
 
-// A clickable slide thumbnail, mirroring DetailPanel's SlideCard.
+// A clickable slide thumbnail, matching design.pen's "Slide Card" (Ez08L):
+// a dark navy gradient card with a 2px accent border when selected.
 class SlideCard : public QFrame {
     Q_OBJECT
 public:
@@ -54,21 +97,23 @@ public:
     {
         setFrameShape(QFrame::NoFrame);
         setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::ClickFocus);
         auto *layout = new QVBoxLayout(this);
-        layout->setContentsMargins(12, 12, 12, 12);
+        layout->setContentsMargins(14, 14, 14, 14);
         m_text = new QLabel(text, this);
         m_text->setWordWrap(true);
         m_text->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-        m_text->setStyleSheet(QStringLiteral("color: white; font-size: 8.5px; background: transparent;"));
+        m_text->setStyleSheet(QStringLiteral("color: white; font-size: 10px; background: transparent;"));
         layout->addWidget(m_text);
         setSelected(false);
     }
 
     void setSelected(bool selected)
     {
-        setStyleSheet(selected
-            ? QStringLiteral("SlideCard { background: #1c2a4a; border: 2px solid %1; border-radius: 10px; }").arg(Theme::AccentBlue)
-            : QStringLiteral("SlideCard { background: #212b3f; border: 2px solid transparent; border-radius: 10px; }"));
+        setStyleSheet(QStringLiteral(
+            "SlideCard { border-radius: 10px; border: 2px solid %1;"
+            " background: qlineargradient(x1:0, y1:0, x2:0.6, y2:1, stop:0 #1c2a4a, stop:1 #0f1524); }")
+                .arg(selected ? Theme::AccentBlue : QStringLiteral("transparent")));
     }
 
 signals:
@@ -81,7 +126,7 @@ private:
     QLabel *m_text = nullptr;
 };
 
-// A left-aligned clickable row used for recent/popular places and search hits.
+// A left-aligned clickable row used for search hits.
 QPushButton *makePlaceRow(const QString &text)
 {
     auto *button = new QPushButton(text);
@@ -90,16 +135,105 @@ QPushButton *makePlaceRow(const QString &text)
     return button;
 }
 
-struct PopularPlace { const char *book; int chapter; int from; int to; };
-const PopularPlace kPopularPlaces[] = {
-    {"Псалми", 22, 1, 6},
-    {"Псалми", 1, 1, 6},
-    {"Від Матвія", 6, 9, 13},
-    {"Ісая", 40, 28, 31},
-    {"До Євреїв", 11, 1, 3},
-};
-
 } // namespace
+
+// A single reference-picker field (design.pen node under D7hQPT): a label
+// above a bordered value box with a trailing chevron. design.pen gives each
+// field an exact pixel width (270/270/130/110/110, summing to 946px with
+// gaps) — kept here as the field's *maximum* width, so it renders
+// pixel-exact whenever the window has room for that. But design.pen has no
+// responsive behavior of its own to fall back on below that, and the app's
+// window can legitimately be narrower than 946+margins (smaller screens) —
+// so each field can also shrink down to a readable minimum and re-elides
+// its own text live as it resizes, rather than ever running into its
+// neighbor (Qt's layout never overlaps siblings on its own; the previous
+// bug was fixed *widths* leaving Qt nowhere to take the missing space from
+// except the gaps between fields, collapsing them to zero). Declared here
+// (not in the anonymous namespace above) so BiblePanel.h can forward-declare
+// it and BiblePanel can keep a couple of these around as members.
+class ReferenceField : public QWidget {
+public:
+    ReferenceField(const QString &label, int designWidth, int minWidth, QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setMinimumWidth(minWidth);
+        setMaximumWidth(designWidth);
+
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+        auto *labelWidget = new QLabel(label);
+        labelWidget->setStyleSheet(QStringLiteral("color: %1; font-size: 12.5px; font-weight: 500;").arg(Theme::TextDarkSecondary));
+        layout->addWidget(labelWidget);
+
+        m_combo = new QComboBox;
+        m_combo->setObjectName(QStringLiteral("FieldBox"));
+        m_combo->setFixedHeight(36);
+        m_combo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        layout->addWidget(m_combo);
+
+        // A sibling of the combo, not its child: the native Windows style
+        // silently fails to paint custom child content in the last ~30px
+        // of a themed QComboBox, so the chevron is drawn as its own
+        // top-level paint target instead (see elideForFieldBox's own
+        // comment for the matching text-painting issue this sidesteps).
+        m_chevron = new QLabel(this);
+        m_chevron->setAttribute(Qt::WA_TransparentForMouseEvents);
+        m_chevron->setPixmap(IconProvider::pixmap(QStringLiteral("chevron-down"), QColor(Theme::TextDarkSecondary), 14));
+        m_chevron->setFixedSize(14, 14);
+        m_comboTop = labelWidget->sizeHint().height() + 6;
+        positionChevron();
+        m_chevron->raise();
+    }
+
+    QComboBox *combo() const { return m_combo; }
+
+    // Replaces the combo's items with these (full, unelided) texts,
+    // re-eliding each to the field's *current* width — call again whenever
+    // the underlying list changes (translation reload, book list refresh).
+    void setItems(const QStringList &fullTexts, int currentIndex = 0)
+    {
+        m_fullTexts = fullTexts;
+        rebuildItems();
+        if (currentIndex >= 0 && currentIndex < m_combo->count())
+            m_combo->setCurrentIndex(currentIndex);
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QWidget::resizeEvent(event);
+        positionChevron();
+        rebuildItems();
+    }
+
+private:
+    void positionChevron()
+    {
+        m_chevron->move(width() - 12 - 14, m_comboTop + (36 - 14) / 2);
+    }
+
+    void rebuildItems()
+    {
+        if (m_fullTexts.isEmpty() || width() <= 0)
+            return;
+        const int keepIndex = m_combo->currentIndex();
+        m_combo->blockSignals(true);
+        m_combo->clear();
+        for (const QString &text : std::as_const(m_fullTexts)) {
+            m_combo->addItem(elideForFieldBox(m_combo, text, width()));
+            m_combo->setItemData(m_combo->count() - 1, text, Qt::ToolTipRole);
+        }
+        if (keepIndex >= 0 && keepIndex < m_combo->count())
+            m_combo->setCurrentIndex(keepIndex);
+        m_combo->blockSignals(false);
+    }
+
+    QComboBox *m_combo;
+    QLabel *m_chevron;
+    QStringList m_fullTexts;
+    int m_comboTop = 0;
+};
 
 BiblePanel::BiblePanel(QWidget *parent)
     : QWidget(parent)
@@ -115,36 +249,17 @@ void BiblePanel::buildUi()
     root->setContentsMargins(28, 22, 28, 22);
     root->setSpacing(16);
 
-    // ---- Header ----
-    auto *headerRow = new QHBoxLayout;
-    headerRow->setSpacing(10);
+    // ---- Header (design.pen node IHhN4) ----
     auto *title = new QLabel(tr("Библия"));
     title->setStyleSheet(QStringLiteral("font-size: 24px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
-    headerRow->addWidget(title);
-    headerRow->addStretch();
+    root->addWidget(title);
 
-    m_favoriteButton = makeOutlineButton(QStringLiteral("star"), tr("Добавить в избранное"));
-    connect(m_favoriteButton, &QPushButton::clicked, this, [this]() {
-        if (m_currentBook == 0)
-            return;
-        ContentItem item = currentItem();
-        item.favorite = true;
-        emit saveToLibraryRequested(item);
-    });
-    headerRow->addWidget(m_favoriteButton);
-
-    auto *moreButton = makeOutlineIconButton(QStringLiteral("ellipsis-vertical"), tr("Ещё"));
-    headerRow->addWidget(moreButton);
-    root->addLayout(headerRow);
-
-    // ---- Tabs ----
+    // ---- Tabs (design.pen node olKsH) ----
     auto *tabsRow = new QHBoxLayout;
     tabsRow->setSpacing(28);
-    m_tabByRef = new QPushButton(tr("По ссылке"));
-    m_tabByRef->setIcon(IconProvider::icon(QStringLiteral("link"), QColor(Theme::AccentBlue), 16));
-    m_tabByText = new QPushButton(tr("По тексту"));
-    m_tabByText->setIcon(IconProvider::icon(QStringLiteral("search"), QColor(Theme::TextDarkSecondary), 16));
-    for (QPushButton *tab : {m_tabByRef, m_tabByText}) {
+    m_tabReference = new QPushButton(tr("По тексту"));
+    m_tabSearch = new QPushButton(tr("По поиску"));
+    for (QPushButton *tab : {m_tabReference, m_tabSearch}) {
         tab->setCheckable(true);
         tab->setObjectName(QStringLiteral("TabButton"));
         tab->setCursor(Qt::PointingHandCursor);
@@ -152,178 +267,225 @@ void BiblePanel::buildUi()
         tabsRow->addWidget(tab);
     }
     tabsRow->addStretch();
-    root->addLayout(tabsRow);
 
+    // Icons recolor with the tab's selected state (design.pen: the active
+    // tab's icon/label are $accent-blue, the inactive one is
+    // $text-dark-secondary) instead of staying fixed to whichever tab was
+    // active at construction time.
+    auto restyleTabIcons = [this]() {
+        m_tabReference->setIcon(IconProvider::icon(QStringLiteral("refresh-ccw"),
+            QColor(m_tabReference->isChecked() ? Theme::AccentBlue : Theme::TextDarkSecondary), 16));
+        m_tabSearch->setIcon(IconProvider::icon(QStringLiteral("search"),
+            QColor(m_tabSearch->isChecked() ? Theme::AccentBlue : Theme::TextDarkSecondary), 16));
+    };
+    restyleTabIcons();
+    connect(m_tabReference, &QPushButton::toggled, this, restyleTabIcons);
+    connect(m_tabSearch, &QPushButton::toggled, this, restyleTabIcons);
+
+    // design.pen's "Tabs Outer" (olKsH) groups the tab row and its 1px
+    // underline with NO gap between them, as one item in Tp127's own
+    // uniform 16px vertical rhythm. Adding tabsRow and the divider as two
+    // separate items straight into `root` would slip an extra, wrong 16px
+    // gap in between them (root's own spacing applies between every item
+    // it holds) — so they're wrapped in a zero-spacing group first.
+    auto *tabsGroup = new QWidget;
+    auto *tabsGroupLayout = new QVBoxLayout(tabsGroup);
+    tabsGroupLayout->setContentsMargins(0, 0, 0, 0);
+    tabsGroupLayout->setSpacing(0);
+    tabsGroupLayout->addLayout(tabsRow);
     auto *tabsDivider = new QWidget;
     tabsDivider->setFixedHeight(1);
     tabsDivider->setStyleSheet(QStringLiteral("background: %1;").arg(Theme::BorderLight));
-    root->addWidget(tabsDivider);
+    tabsGroupLayout->addWidget(tabsDivider);
+    root->addWidget(tabsGroup);
 
     auto *tabGroup = new QButtonGroup(this);
-    tabGroup->addButton(m_tabByRef, TabByRef);
-    tabGroup->addButton(m_tabByText, TabByText);
-    m_tabByRef->setChecked(true);
+    tabGroup->addButton(m_tabReference, TabReference);
+    tabGroup->addButton(m_tabSearch, TabSearch);
+    m_tabReference->setChecked(true);
 
     m_tabStack = new QStackedWidget;
     root->addWidget(m_tabStack, 1);
     connect(tabGroup, &QButtonGroup::idClicked, m_tabStack, &QStackedWidget::setCurrentIndex);
 
-    // ---- Page: by reference ----
+    // ---- Page: По тексту (reference browser) ----
     auto *refPage = new QWidget;
     auto *refLayout = new QVBoxLayout(refPage);
     refLayout->setContentsMargins(0, 0, 0, 0);
-    refLayout->setSpacing(18);
+    refLayout->setSpacing(16);
 
+    // Matches design.pen node D7hQPT ("Reference Picker Row"): five fields
+    // at exact pixel widths (270/270/130/110/110) with 14px gaps whenever
+    // the window is wide enough — see ReferenceField above for how each one
+    // shrinks below that instead of ever overlapping its neighbor.
     auto *pickerRow = new QHBoxLayout;
     pickerRow->setSpacing(14);
 
-    auto makeField = [&](const QString &label, int width) -> QComboBox * {
-        auto *wrap = new QWidget;
-        wrap->setFixedWidth(width);
-        auto *wrapLayout = new QVBoxLayout(wrap);
-        wrapLayout->setContentsMargins(0, 0, 0, 0);
-        wrapLayout->setSpacing(6);
-        auto *labelWidget = new QLabel(label);
-        labelWidget->setStyleSheet(QStringLiteral("color: %1; font-size: 12.5px;").arg(Theme::TextDarkSecondary));
-        auto *combo = new QComboBox;
-        combo->setObjectName(QStringLiteral("FieldBox"));
-        combo->setFixedHeight(36);
-        wrapLayout->addWidget(labelWidget);
-        wrapLayout->addWidget(combo);
-        pickerRow->addWidget(wrap);
-        return combo;
+    auto makeField = [&](const QString &label, int designWidth, int minWidth) -> ReferenceField * {
+        auto *field = new ReferenceField(label, designWidth, minWidth);
+        pickerRow->addWidget(field, designWidth);
+        return field;
     };
 
-    m_translationBox = makeField(tr("Перевод"), 270);
-    m_bookBox = makeField(tr("Книга"), 270);
-    m_chapterBox = makeField(tr("Глава"), 130);
-    m_fromBox = makeField(tr("С"), 110);
-    m_toBox = makeField(tr("По"), 110);
+    m_translationField = makeField(tr("Перевод"), 270, 150);
+    m_bookField = makeField(tr("Книга"), 270, 150);
+    auto *chapterField = makeField(tr("Глава"), 130, 80);
+    auto *fromField = makeField(tr("С"), 110, 70);
+    auto *toField = makeField(tr("По"), 110, 70);
     pickerRow->addStretch();
     refLayout->addLayout(pickerRow);
+
+    m_translationBox = m_translationField->combo();
+    m_bookBox = m_bookField->combo();
+    m_chapterBox = chapterField->combo();
+    m_fromBox = fromField->combo();
+    m_toBox = toField->combo();
 
     connect(m_bookBox, &QComboBox::currentIndexChanged, this, &BiblePanel::onBookChanged);
     connect(m_chapterBox, &QComboBox::currentIndexChanged, this, &BiblePanel::onChapterChanged);
     connect(m_fromBox, &QComboBox::currentIndexChanged, this, &BiblePanel::onRangeChanged);
     connect(m_toBox, &QComboBox::currentIndexChanged, this, &BiblePanel::onRangeChanged);
 
-    auto *bodyRow = new QHBoxLayout;
-    bodyRow->setSpacing(24);
+    // design.pen no longer has a "Search Row" under the picker on the "По
+    // тексту" page (removed in a later revision) — full-text search now
+    // lives only on the "По поиску" tab's own search box.
+    const QString searchPlaceholder = tr("Поиск в тексте книг, своих заметках, назв. слайдов, плейлистах...");
 
-    // Places column
-    auto *placesColumn = new QWidget;
-    placesColumn->setFixedWidth(320);
-    auto *placesLayout = new QVBoxLayout(placesColumn);
-    placesLayout->setContentsMargins(0, 0, 0, 0);
-    placesLayout->setSpacing(20);
+    // design.pen dropped the bordered "card" look entirely: the verse detail
+    // now sits directly on the page background, and the verses box grows
+    // with its content instead of a fixed card height — a "Bottom Spacer"
+    // (fill_container) between the divider and the slides section absorbs
+    // whatever room is left, pinning the slides block to the page bottom.
+    auto *bodyLayout = new QVBoxLayout;
+    bodyLayout->setSpacing(16);
 
-    auto makeSection = [&](const QString &iconName, const QString &title) -> QVBoxLayout * {
-        auto *section = new QVBoxLayout;
-        section->setSpacing(8);
-        auto *head = new QHBoxLayout;
-        head->setSpacing(8);
-        auto *icon = new QLabel;
-        icon->setPixmap(IconProvider::pixmap(iconName, QColor(Theme::TextDarkSecondary), 15));
-        auto *label = new QLabel(title);
-        label->setStyleSheet(QStringLiteral("color: %1; font-size: 13.5px; font-weight: 600;").arg(Theme::TextDarkSecondary));
-        head->addWidget(icon);
-        head->addWidget(label);
-        head->addStretch();
-        section->addLayout(head);
-        placesLayout->addLayout(section);
-        return section;
-    };
-
-    auto *recentSection = makeSection(QStringLiteral("history"), tr("Недавние места"));
-    auto *recentList = new QVBoxLayout;
-    recentList->setSpacing(2);
-    recentSection->addLayout(recentList);
-    m_recentList = recentList;
-
-    auto *popularSection = makeSection(QStringLiteral("flame"), tr("Популярные места"));
-    auto *popularList = new QVBoxLayout;
-    popularList->setSpacing(2);
-    popularSection->addLayout(popularList);
-    for (const PopularPlace &place : kPopularPlaces) {
-        const QString label = place.from == place.to
-            ? tr("%1 %2:%3").arg(QString::fromUtf8(place.book)).arg(place.chapter).arg(place.from)
-            : tr("%1 %2:%3–%4").arg(QString::fromUtf8(place.book)).arg(place.chapter).arg(place.from).arg(place.to);
-        auto *row = makePlaceRow(label);
-        const QString bookNameCopy = QString::fromUtf8(place.book);
-        const int chapter = place.chapter, from = place.from, to = place.to;
-        connect(row, &QPushButton::clicked, this, [this, bookNameCopy, chapter, from, to]() {
-            for (const BibleBook &book : std::as_const(m_books)) {
-                if (book.name == bookNameCopy) {
-                    selectReference(book.num, chapter, from, to);
-                    break;
-                }
-            }
-        });
-        popularList->addWidget(row);
-    }
-    placesLayout->addStretch();
-    bodyRow->addWidget(placesColumn);
-
-    // Verse detail column
-    auto *verseColumn = new QWidget;
-    auto *verseLayout = new QVBoxLayout(verseColumn);
-    verseLayout->setContentsMargins(0, 0, 0, 0);
-    verseLayout->setSpacing(12);
-
+    // ---- Verse Detail Column (design.pen node TfeFx) ----
+    // Matches design.pen node QhAVp ("Verse Detail Head"): title on the
+    // left, translation label + favorite button grouped on the right
+    // (space-between).
     auto *verseHead = new QHBoxLayout;
-    auto *refTitleCol = new QVBoxLayout;
-    refTitleCol->setSpacing(2);
     m_refTitle = new QLabel;
-    m_refTitle->setStyleSheet(QStringLiteral("font-size: 19px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
-    m_translationCaption = new QLabel;
-    m_translationCaption->setStyleSheet(QStringLiteral("font-size: 12.5px; color: %1;").arg(Theme::TextDarkSecondary));
-    refTitleCol->addWidget(m_refTitle);
-    refTitleCol->addWidget(m_translationCaption);
-    verseHead->addLayout(refTitleCol);
+    m_refTitle->setStyleSheet(QStringLiteral("font-size: 20px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
+    verseHead->addWidget(m_refTitle);
+    // "Недавние места" (Настройки → Библия → Количество недавних мест).
+    m_recentButton = new QPushButton;
+    m_recentButton->setFlat(true);
+    m_recentButton->setCursor(Qt::PointingHandCursor);
+    m_recentButton->setFixedSize(30, 30);
+    m_recentButton->setIcon(IconProvider::icon(QStringLiteral("clock"), QColor(Theme::TextDarkSecondary), 17));
+    m_recentButton->setIconSize(QSize(17, 17));
+    m_recentButton->setToolTip(tr("Недавние места"));
+    m_recentButton->setStyleSheet(QStringLiteral("QPushButton { border: none; background: transparent; border-radius: 8px; }"
+                                                 "QPushButton:hover { background: #f3f4f6; }"));
+    connect(m_recentButton, &QPushButton::clicked, this, &BiblePanel::showRecentMenu);
+    verseHead->addSpacing(6);
+    verseHead->addWidget(m_recentButton);
     verseHead->addStretch();
-    verseLayout->addLayout(verseHead);
 
+    m_translationCaption = new QLabel;
+    m_translationCaption->setStyleSheet(QStringLiteral("font-size: 13px; font-weight: 400; color: %1;").arg(Theme::TextDarkSecondary));
+    verseHead->addWidget(m_translationCaption);
+
+    // design.pen node d3SHa ("Favorite Button") — relocated here from the
+    // page header, relabeled "В избранное".
+    m_favoriteButton = makeOutlineButton(QStringLiteral("star"), tr("В избранное"));
+    connect(m_favoriteButton, &QPushButton::clicked, this, [this]() {
+        if (m_currentBook == 0)
+            return;
+        ContentItem item = currentItem();
+        item.favorite = true;
+        emit saveToLibraryRequested(item);
+    });
+    verseHead->addSpacing(14);
+    verseHead->addWidget(m_favoriteButton);
+    bodyLayout->addLayout(verseHead);
+
+    // Matches design.pen node IAk7I ("Verses Box"): fit-content height, 6px
+    // top padding, 16px gap between verse rows, no border/card. Still a
+    // QScrollArea with both scrollbars forced off rather than a plain
+    // QWidget: a chapter can run to 30+ verses, and unlike the design's own
+    // mock (a short 6-verse chapter, which fits without scrolling and just
+    // leaves the flexible space below larger), the real page has nowhere
+    // to grow — a plain fixed-height QWidget can't gracefully clip a child
+    // whose required height vastly exceeds it (Qt's layout fails to give it
+    // any paintable geometry at all, so the verse text disappears entirely
+    // instead of being cut off). QScrollArea's viewport clips correctly
+    // regardless of content size; hiding both scrollbars keeps the visual
+    // identical to the design while the mouse wheel still quietly reaches a
+    // long chapter's tail.
     auto *versesScroll = new QScrollArea;
     versesScroll->setWidgetResizable(true);
     versesScroll->setFrameShape(QFrame::NoFrame);
-    versesScroll->setObjectName(QStringLiteral("LyricsBox"));
+    versesScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    versesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    versesScroll->viewport()->setStyleSheet(QStringLiteral("QWidget#qt_scrollarea_viewport { background: #ffffff; }"));
     auto *versesContainer = new QWidget;
     versesContainer->setStyleSheet(QStringLiteral("background: transparent;"));
     m_versesLayout = new QVBoxLayout(versesContainer);
-    m_versesLayout->setContentsMargins(4, 4, 4, 4);
-    m_versesLayout->setSpacing(10);
-    m_versesLayout->addStretch();
+    m_versesLayout->setContentsMargins(0, 6, 0, 0);
+    m_versesLayout->setSpacing(16);
     versesScroll->setWidget(versesContainer);
-    verseLayout->addWidget(versesScroll, 1);
+    // setWidget() turns on the content's own (gray) palette fill; let the white viewport show.
+    versesContainer->setAutoFillBackground(false);
+    bodyLayout->addWidget(versesScroll, 1);
 
+    // Body Divider (design.pen node YyCXb)
+    auto *bodyDivider = new QWidget;
+    bodyDivider->setFixedHeight(1);
+    bodyDivider->setStyleSheet(QStringLiteral("background: %1;").arg(Theme::BorderLight));
+    bodyLayout->addWidget(bodyDivider);
+
+    // design.pen's "Bottom Spacer" (hTz4O, height: fill_container) is
+    // already covered by versesScroll's own stretch factor above — it's the
+    // one expanding item in this layout, so it absorbs whatever room is
+    // left and pins the slides section below to the page bottom.
+
+    // ---- Slides Head Row (design.pen node Z9TgeV) ----
     auto *slidesHeadRow = new QHBoxLayout;
     m_slidesHeading = new QLabel;
     m_slidesHeading->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 700; color: %1;").arg(Theme::TextDarkPrimary));
     slidesHeadRow->addWidget(m_slidesHeading);
     slidesHeadRow->addStretch();
-    m_splitCheckBox = new QCheckBox(tr("Разделить по стихам"));
-    m_splitCheckBox->setChecked(true);
-    m_splitCheckBox->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(Theme::TextDarkPrimary));
-    connect(m_splitCheckBox, &QCheckBox::toggled, this, [this](bool) { refreshVerseView(); });
-    slidesHeadRow->addWidget(m_splitCheckBox);
-    verseLayout->addLayout(slidesHeadRow);
+    m_slidesCollapseButton = new QPushButton;
+    m_slidesCollapseButton->setFlat(true);
+    m_slidesCollapseButton->setCursor(Qt::PointingHandCursor);
+    m_slidesCollapseButton->setFixedSize(24, 24);
+    m_slidesCollapseButton->setIconSize(QSize(16, 16));
+    m_slidesCollapseButton->setStyleSheet(QStringLiteral("border: none; background: transparent;"));
+    connect(m_slidesCollapseButton, &QPushButton::clicked, this, [this]() { setSlidesCollapsed(!m_slidesCollapsed); });
+    slidesHeadRow->addWidget(m_slidesCollapseButton);
+    bodyLayout->addLayout(slidesHeadRow);
 
+    // ---- Slides Row (design.pen node lu0J0) ----
     auto *slidesScroll = new QScrollArea;
     slidesScroll->setWidgetResizable(true);
     slidesScroll->setFrameShape(QFrame::NoFrame);
-    slidesScroll->setFixedHeight(140);
+    // 124 (card 100 + 8 gap + number label) is design.pen's own number for
+    // its no-scroll 6-slide example, but it leaves no room for the
+    // horizontal scrollbar that appears for any chapter with more slides
+    // than fit on one screen (i.e. almost every real chapter) — that
+    // scrollbar was eating into the fixed height and clipping the slide
+    // number label right off the bottom of every row.
+    slidesScroll->setFixedHeight(148);
     slidesScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     slidesScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    slidesScroll->viewport()->setStyleSheet(QStringLiteral("QWidget#qt_scrollarea_viewport { background: #ffffff; }"));
     auto *slidesContainer = new QWidget;
     m_slidesRow = new QHBoxLayout(slidesContainer);
     m_slidesRow->setContentsMargins(2, 2, 2, 2);
     m_slidesRow->setSpacing(14);
     slidesScroll->setWidget(slidesContainer);
-    verseLayout->addWidget(slidesScroll);
+    // setWidget() turns on the content's own (gray) palette fill; let the white viewport show.
+    slidesContainer->setAutoFillBackground(false);
+    bodyLayout->addWidget(slidesScroll);
+    m_slidesScroll = slidesScroll;
+    setSlidesCollapsed(false);
 
+    // ---- Slide Actions Row (design.pen node dw9AW) ----
     auto *actionsRow = new QHBoxLayout;
-    actionsRow->setSpacing(10);
-    auto *addSlideButton = makeOutlineButton(QStringLiteral("plus"), tr("Добавить слайд"));
+    auto *leftActions = new QHBoxLayout;
+    leftActions->setSpacing(10);
+    auto *addSlideButton = makePrimaryButton(QStringLiteral("plus"), tr("Добавить слайд"));
     auto *copySlideButton = makeOutlineIconButton(QStringLiteral("copy"), tr("Дублировать слайд"));
     auto *deleteSlideButton = makeOutlineIconButton(QStringLiteral("trash-2"), tr("Удалить слайд"));
     connect(addSlideButton, &QPushButton::clicked, this, [this]() {
@@ -348,37 +510,37 @@ void BiblePanel::buildUi()
         applySlideTextChange(slides);
         selectSlide(qMin(m_selectedSlide, slides.size() - 1));
     });
-    actionsRow->addWidget(addSlideButton);
-    actionsRow->addWidget(copySlideButton);
-    actionsRow->addWidget(deleteSlideButton);
+    leftActions->addWidget(addSlideButton);
+    leftActions->addWidget(copySlideButton);
+    leftActions->addWidget(deleteSlideButton);
+    actionsRow->addLayout(leftActions);
     actionsRow->addStretch();
 
-    auto *previewButton = makeOutlineButton(QStringLiteral("eye"), tr("Предпросмотр"));
+    auto *rightActions = new QHBoxLayout;
+    rightActions->setSpacing(10);
+    auto *previewButton = makeOutlineButton(QStringLiteral("settings"), tr("Предпросмотр"));
     connect(previewButton, &QPushButton::clicked, this, [this]() {
         if (m_currentBook != 0)
             emit previewRequested(currentItem(), m_selectedSlide);
     });
-    actionsRow->addWidget(previewButton);
+    rightActions->addWidget(previewButton);
 
-    auto *onScreenButton = new QPushButton(tr("На экран"));
+    auto *onScreenButton = new ChevronButton(QStringLiteral("monitor"), tr("На экран"), QColor(Theme::TextLightPrimary));
     onScreenButton->setObjectName(QStringLiteral("PrimaryButton"));
-    onScreenButton->setCursor(Qt::PointingHandCursor);
-    onScreenButton->setIcon(IconProvider::icon(QStringLiteral("monitor"), QColor(Theme::TextLightPrimary), 15));
-    onScreenButton->setIconSize(QSize(15, 15));
-    connect(onScreenButton, &QPushButton::clicked, this, &BiblePanel::triggerGoLive);
-    actionsRow->addWidget(onScreenButton);
+    connect(onScreenButton, &ChevronButton::clicked, this, &BiblePanel::triggerGoLive);
+    rightActions->addWidget(onScreenButton);
+    actionsRow->addLayout(rightActions);
 
-    verseLayout->addLayout(actionsRow);
-    bodyRow->addWidget(verseColumn, 1);
-    refLayout->addLayout(bodyRow, 1);
+    bodyLayout->addLayout(actionsRow);
+    refLayout->addLayout(bodyLayout, 1);
 
-    m_tabStack->insertWidget(TabByRef, refPage);
+    m_tabStack->insertWidget(TabReference, refPage);
 
-    // ---- Page: by text ----
-    auto *textPage = new QWidget;
-    auto *textLayout = new QVBoxLayout(textPage);
-    textLayout->setContentsMargins(0, 0, 0, 0);
-    textLayout->setSpacing(14);
+    // ---- Page: По поиску (full-text search) ----
+    auto *searchPage = new QWidget;
+    auto *searchPageLayout = new QVBoxLayout(searchPage);
+    searchPageLayout->setContentsMargins(0, 0, 0, 0);
+    searchPageLayout->setSpacing(14);
 
     auto *searchRow = new QHBoxLayout;
     searchRow->setSpacing(10);
@@ -390,26 +552,40 @@ void BiblePanel::buildUi()
     auto *searchIcon = new QLabel;
     searchIcon->setPixmap(IconProvider::pixmap(QStringLiteral("search"), QColor(Theme::TextDarkSecondary), 16));
     m_searchBox = new QLineEdit;
-    m_searchBox->setPlaceholderText(tr("Поиск по тексту или ссылке (например: Ин 3:16)"));
+    m_searchBox->setPlaceholderText(searchPlaceholder);
+    m_searchBox->setObjectName(QStringLiteral("SearchField")); // Ctrl+F (Горячие клавиши → Поиск)
+    // "Хранить историю поиска": earlier queries are offered as you type.
+    m_searchHistory = new QStringListModel(QSettings().value(QStringLiteral("bible/recentSearches")).toStringList(), this);
+    auto *completer = new QCompleter(m_searchHistory, this);
+    completer->setCaseSensitivity(Qt::CaseInsensitive);
+    completer->setFilterMode(Qt::MatchContains);
+    m_searchBox->setCompleter(completer);
+    connect(m_searchBox, &QLineEdit::returnPressed, this, [this]() { rememberSearch(m_searchBox->text()); });
     m_searchBox->setFrame(false);
     searchBoxLayout->addWidget(searchIcon);
     searchBoxLayout->addWidget(m_searchBox, 1);
     connect(m_searchBox, &QLineEdit::textChanged, this, &BiblePanel::runSearch);
     searchRow->addWidget(searchBoxWrap, 1);
-    textLayout->addLayout(searchRow);
+    searchRow->addWidget(makeOutlineIconButton(QStringLiteral("list-filter"), tr("Фильтр"),
+                                                QColor(Theme::TextDarkSecondary), 16));
+    searchPageLayout->addLayout(searchRow);
 
     auto *resultsScroll = new QScrollArea;
     resultsScroll->setWidgetResizable(true);
     resultsScroll->setFrameShape(QFrame::NoFrame);
+    resultsScroll->setStyleSheet(QStringLiteral("QScrollArea { background: #ffffff; border: none; }"));
+    resultsScroll->viewport()->setStyleSheet(QStringLiteral("QWidget#qt_scrollarea_viewport { background: #ffffff; }"));
     auto *resultsContainer = new QWidget;
     m_searchResults = new QVBoxLayout(resultsContainer);
     m_searchResults->setContentsMargins(0, 0, 0, 0);
     m_searchResults->setSpacing(2);
     m_searchResults->addStretch();
     resultsScroll->setWidget(resultsContainer);
-    textLayout->addWidget(resultsScroll, 1);
+    // setWidget() turns on the content's own (gray) palette fill; let the white viewport show.
+    resultsContainer->setAutoFillBackground(false);
+    searchPageLayout->addWidget(resultsScroll, 1);
 
-    m_tabStack->insertWidget(TabByText, textPage);
+    m_tabStack->insertWidget(TabSearch, searchPage);
 
     setStyleSheet(QStringLiteral(R"(
         QWidget#BiblePanel { background: #ffffff; }
@@ -423,22 +599,25 @@ void BiblePanel::buildUi()
             background: %3; border: none; border-radius: 9px; padding: 9px 16px;
             font-weight: 600; font-size: 13.5px; color: #ffffff;
         }
-        QPushButton#PrimaryButton:hover { background: #255ed1; }
+        QFrame#PrimaryButton {
+            background: %3; border: none; border-radius: 9px;
+        }
+        QPushButton#PrimaryButton:hover, QFrame#PrimaryButton:hover { background: #255ed1; }
         QPushButton#TabButton {
             background: transparent; border: none; border-bottom: 2px solid transparent;
             padding: 0 0 10px 0; font-size: 14px; font-weight: 500; color: %4;
         }
         QPushButton#TabButton:checked { color: %3; font-weight: 600; border-bottom: 2px solid %3; }
-        QScrollArea#LyricsBox { border: 1px solid %2; border-radius: 12px; }
         QComboBox#FieldBox {
-            border: 1px solid %2; border-radius: 9px; padding: 6px 10px;
-            font-size: 13.5px; color: %1; background: #ffffff;
+            border: 1px solid %2; border-radius: 9px; padding: 10px 30px 10px 12px;
+            font-size: 14px; font-weight: 500; color: %1; background: #ffffff;
         }
+        QComboBox#FieldBox::drop-down { width: 0px; border: none; }
         QFrame#SearchBox { background: #ffffff; border: 1px solid %2; border-radius: 9px; min-height: 38px; }
         QLineEdit { border: none; background: transparent; font-size: 13px; color: %1; }
         QPushButton#PlaceRow {
-            text-align: left; border: none; background: transparent; border-radius: 8px;
-            padding: 8px 6px; font-size: 13.5px; color: %1;
+            text-align: left; border: none; background: transparent; border-radius: 9px;
+            padding: 10px 12px; font-size: 13.5px; font-weight: 600; color: %1;
         }
         QPushButton#PlaceRow:hover { background: #f3f4f6; color: %3; }
     )").arg(Theme::TextDarkPrimary, Theme::BorderLight, Theme::AccentBlue, Theme::TextDarkSecondary));
@@ -449,8 +628,19 @@ void BiblePanel::buildUi()
 void BiblePanel::reload()
 {
     m_translation = m_repo.defaultTranslation();
-    m_translationBox->clear();
-    m_translationBox->addItem(m_translation.isEmpty() ? tr("Нет перевода") : m_translation);
+    const QString alt = AppSettings::value(AppSettings::BibleAltTranslation).toString();
+    m_altTranslation = AppSettings::value(AppSettings::BibleAltEnabled).toBool() && alt != m_translation
+            && m_repo.translations().contains(alt)
+        ? alt : QString();
+    m_recentButton->setVisible(AppSettings::value(AppSettings::BibleKeepHistory).toBool());
+    if (!AppSettings::value(AppSettings::BibleKeepHistory).toBool()) {
+        QSettings().remove(QStringLiteral("bible/recentPlaces"));
+        QSettings().remove(QStringLiteral("bible/recentSearches"));
+    }
+    if (m_searchHistory)
+        m_searchHistory->setStringList(QSettings().value(QStringLiteral("bible/recentSearches")).toStringList());
+    const QString translationLabel = m_translation.isEmpty() ? tr("Нет перевода") : m_translation;
+    m_translationField->setItems({translationLabel});
 
     populateBooks();
 
@@ -467,11 +657,11 @@ void BiblePanel::reload()
 void BiblePanel::populateBooks()
 {
     m_books = m_repo.books(m_translation);
-    m_bookBox->blockSignals(true);
-    m_bookBox->clear();
+    QStringList bookNames;
+    bookNames.reserve(m_books.size());
     for (const BibleBook &book : std::as_const(m_books))
-        m_bookBox->addItem(book.name);
-    m_bookBox->blockSignals(false);
+        bookNames << book.name;
+    m_bookField->setItems(bookNames);
 }
 
 QString BiblePanel::bookName(int bookNum) const
@@ -525,7 +715,6 @@ void BiblePanel::onChapterChanged()
     m_currentFrom = 1;
     m_currentTo = count;
     refreshVerseView();
-    pushRecent(m_currentBook, m_currentChapter, m_currentFrom, m_currentTo);
 }
 
 void BiblePanel::onRangeChanged()
@@ -541,7 +730,6 @@ void BiblePanel::onRangeChanged()
         m_toBox->blockSignals(false);
     }
     refreshVerseView();
-    pushRecent(m_currentBook, m_currentChapter, m_currentFrom, m_currentTo);
 }
 
 void BiblePanel::selectReference(int bookNum, int chapter, int fromVerse, int toVerse)
@@ -586,11 +774,10 @@ void BiblePanel::selectReference(int bookNum, int chapter, int fromVerse, int to
     m_toBox->blockSignals(false);
 
     refreshVerseView();
-    pushRecent(m_currentBook, m_currentChapter, m_currentFrom, m_currentTo);
 
-    if (m_tabStack->currentIndex() != TabByRef) {
-        m_tabByRef->setChecked(true);
-        m_tabStack->setCurrentIndex(TabByRef);
+    if (m_tabStack->currentIndex() != TabReference) {
+        m_tabReference->setChecked(true);
+        m_tabStack->setCurrentIndex(TabReference);
     }
 }
 
@@ -615,24 +802,56 @@ void BiblePanel::refreshVerseView()
         auto *row = new QWidget;
         auto *rowLayout = new QHBoxLayout(row);
         rowLayout->setContentsMargins(0, 0, 0, 0);
-        rowLayout->setSpacing(10);
+        rowLayout->setSpacing(14);
+        // Matches design.pen node W0lMTI ("Verse Row"): the number is an
+        // auto-width label of the same weight/size family as the verse
+        // text, left-aligned — not a fixed-width right-aligned column.
         auto *number = new QLabel(QString::number(verse.verse));
-        number->setFixedWidth(20);
-        number->setAlignment(Qt::AlignTop | Qt::AlignRight);
-        number->setStyleSheet(QStringLiteral("color: %1; font-size: 12.5px; font-weight: 600;").arg(Theme::AccentBlue));
+        number->setStyleSheet(QStringLiteral("color: %1; font-size: 16px; font-weight: 700;").arg(Theme::TextDarkPrimary));
         auto *text = new QLabel(verse.text);
         text->setWordWrap(true);
-        text->setStyleSheet(QStringLiteral("color: %1; font-size: 14.5px;").arg(Theme::TextDarkPrimary));
-        rowLayout->addWidget(number);
+        text->setStyleSheet(QStringLiteral("color: %1; font-size: 16px;").arg(Theme::TextDarkPrimary));
+        rowLayout->addWidget(number, 0, Qt::AlignTop);
         rowLayout->addWidget(text, 1);
-        m_versesLayout->insertWidget(m_versesLayout->count() - 1, row);
+        m_versesLayout->addWidget(row);
     }
 
-    m_slides = verses.isEmpty()
-        ? QStringList{QString()}
-        : (m_splitCheckBox->isChecked()
-               ? [&]() { QStringList s; for (const BibleVerse &v : verses) s << v.text; return s; }()
-               : QStringList{[&]() { QStringList parts; for (const BibleVerse &v : verses) parts << v.text; return parts.join(QStringLiteral(" ")); }()});
+    // Настройки → Библия: one slide per verse or the whole passage on one,
+    // verse numbers as superscripts (¹⁶), and the alternative translation
+    // under each verse.
+    const bool split = AppSettings::value(AppSettings::BibleSplitVerses).toBool();
+    const bool numbers = AppSettings::value(AppSettings::BibleVerseNumbers).toBool()
+        || AppSettings::value(DisplaySettings::styleKey(ContentType::BibleVerse, QStringLiteral("separateVerseNumber"))).toBool();
+    QList<BibleVerse> altVerses;
+    if (!m_altTranslation.isEmpty())
+        altVerses = m_repo.verses(m_altTranslation, m_currentBook, m_currentChapter, m_currentFrom, m_currentTo);
+    const auto superscript = [](int number) {
+        static const QString digits = QStringLiteral("⁰¹²³⁴⁵⁶⁷⁸⁹");
+        QString result;
+        for (const QChar c : QString::number(number))
+            result += digits.at(c.digitValue());
+        return result;
+    };
+    QStringList parts;
+    for (int i = 0; i < verses.size(); ++i) {
+        QString part = numbers ? superscript(verses.at(i).verse) + QLatin1Char(' ') + verses.at(i).text : verses.at(i).text;
+        for (const BibleVerse &altVerse : std::as_const(altVerses)) {
+            if (altVerse.verse == verses.at(i).verse)
+                part += QLatin1Char('\n') + altVerse.text;
+        }
+        parts << part;
+    }
+    if (parts.isEmpty())
+        m_slides = QStringList{QString()};
+    else if (split)
+        m_slides = parts;
+    else
+        m_slides = QStringList{parts.join(QLatin1Char(' '))};
+    m_slides = DisplaySettings::splitTextSlides(ContentType::BibleVerse, m_slides);
+    if (m_slides.isEmpty() || !m_slides.last().isEmpty()) {
+        m_slides << QString();
+    }
+    rememberPlace();
 
     m_selectedSlide = 0;
     m_slidesHeading->setText(tr("Слайды (%1)").arg(m_slides.size()));
@@ -660,15 +879,16 @@ void BiblePanel::rebuildSlides()
         auto *columnLayout = new QVBoxLayout(column);
         columnLayout->setContentsMargins(0, 0, 0, 0);
         columnLayout->setSpacing(8);
+        columnLayout->setAlignment(Qt::AlignHCenter);
 
         auto *card = new SlideCard(m_slides.at(i).isEmpty() ? tr("(пусто)") : m_slides.at(i));
-        card->setFixedSize(150, 108);
+        card->setFixedSize(145, 100);
         card->setSelected(i == m_selectedSlide);
         connect(card, &SlideCard::clicked, this, [this, i]() { selectSlide(i); });
 
         auto *number = new QLabel(QString::number(i + 1));
         number->setAlignment(Qt::AlignCenter);
-        number->setStyleSheet(QStringLiteral("color: %1; font-size: 12.5px; font-weight: 500;").arg(Theme::TextDarkSecondary));
+        number->setStyleSheet(QStringLiteral("color: %1; font-size: 13px; font-weight: 600;").arg(Theme::TextDarkSecondary));
 
         columnLayout->addWidget(card);
         columnLayout->addWidget(number);
@@ -680,41 +900,6 @@ void BiblePanel::selectSlide(int index)
 {
     m_selectedSlide = qBound(0, index, qMax(0, m_slides.size() - 1));
     rebuildSlides();
-}
-
-void BiblePanel::pushRecent(int bookNum, int chapter, int fromVerse, int toVerse)
-{
-    for (int i = m_recent.size() - 1; i >= 0; --i) {
-        const RecentEntry &e = m_recent.at(i);
-        if (e.book == bookNum && e.chapter == chapter && e.from == fromVerse && e.to == toVerse)
-            m_recent.removeAt(i);
-    }
-    m_recent.prepend({bookNum, chapter, fromVerse, toVerse});
-    while (m_recent.size() > 5)
-        m_recent.removeLast();
-    rebuildRecentList();
-}
-
-void BiblePanel::rebuildRecentList()
-{
-    QLayoutItem *child;
-    while ((child = m_recentList->takeAt(0)) != nullptr) {
-        if (child->widget())
-            child->widget()->deleteLater();
-        delete child;
-    }
-
-    for (const RecentEntry &entry : std::as_const(m_recent)) {
-        const QString book = bookName(entry.book);
-        const QString label = entry.from == entry.to
-            ? tr("%1 %2:%3").arg(book).arg(entry.chapter).arg(entry.from)
-            : tr("%1 %2:%3–%4").arg(book).arg(entry.chapter).arg(entry.from).arg(entry.to);
-        auto *row = makePlaceRow(label);
-        connect(row, &QPushButton::clicked, this, [this, entry]() {
-            selectReference(entry.book, entry.chapter, entry.from, entry.to);
-        });
-        m_recentList->addWidget(row);
-    }
 }
 
 void BiblePanel::runSearch(const QString &text)
@@ -733,11 +918,82 @@ void BiblePanel::runSearch(const QString &text)
             snippet = snippet.left(90) + QStringLiteral("…");
         const QString label = tr("%1 %2:%3 — %4").arg(hit.bookName).arg(hit.chapter).arg(hit.verse).arg(snippet);
         auto *row = makePlaceRow(label);
-        connect(row, &QPushButton::clicked, this, [this, hit]() {
+        connect(row, &QPushButton::clicked, this, [this, hit, text]() {
+            rememberSearch(text);
             selectReference(hit.bookNum, hit.chapter, hit.verse, hit.verse);
         });
         m_searchResults->insertWidget(m_searchResults->count() - 1, row);
     }
+}
+
+void BiblePanel::rememberPlace()
+{
+    if (!AppSettings::value(AppSettings::BibleKeepHistory).toBool() || m_currentBook == 0)
+        return;
+    const QString place = QStringLiteral("%1|%2|%3|%4").arg(m_currentBook).arg(m_currentChapter).arg(m_currentFrom).arg(m_currentTo);
+    QStringList places = QSettings().value(QStringLiteral("bible/recentPlaces")).toStringList();
+    places.removeAll(place);
+    places.prepend(place);
+    const int limit = qBound(1, AppSettings::value(AppSettings::BibleRecentCount).toInt(), 50);
+    QSettings().setValue(QStringLiteral("bible/recentPlaces"), QStringList(places.mid(0, limit)));
+}
+
+void BiblePanel::rememberSearch(const QString &text)
+{
+    const QString query = text.trimmed();
+    if (query.size() < 2 || !AppSettings::value(AppSettings::BibleKeepHistory).toBool())
+        return;
+    QStringList searches = QSettings().value(QStringLiteral("bible/recentSearches")).toStringList();
+    searches.removeAll(query);
+    searches.prepend(query);
+    searches = searches.mid(0, qBound(1, AppSettings::value(AppSettings::BibleRecentCount).toInt(), 50));
+    QSettings().setValue(QStringLiteral("bible/recentSearches"), searches);
+    m_searchHistory->setStringList(searches);
+}
+
+void BiblePanel::showRecentMenu()
+{
+    QMenu menu(this);
+    const int limit = qBound(1, AppSettings::value(AppSettings::BibleRecentCount).toInt(), 50);
+    const QStringList places = QSettings().value(QStringLiteral("bible/recentPlaces")).toStringList().mid(0, limit);
+    for (const QString &place : places) {
+        const QStringList parts = place.split(QLatin1Char('|'));
+        if (parts.size() != 4)
+            continue;
+        const int book = parts.at(0).toInt();
+        const int chapter = parts.at(1).toInt();
+        const int from = parts.at(2).toInt();
+        const int to = parts.at(3).toInt();
+        const QString label = from == to ? tr("%1 %2:%3").arg(bookName(book)).arg(chapter).arg(from)
+                                         : tr("%1 %2:%3–%4").arg(bookName(book)).arg(chapter).arg(from).arg(to);
+        menu.addAction(label, this, [this, book, chapter, from, to]() { selectReference(book, chapter, from, to); });
+    }
+    if (menu.isEmpty())
+        menu.addAction(tr("Пока пусто"))->setEnabled(false);
+    menu.exec(m_recentButton->mapToGlobal(QPoint(0, m_recentButton->height() + 4)));
+}
+
+void BiblePanel::setSlidesCollapsed(bool collapsed)
+{
+    m_slidesCollapsed = collapsed;
+    m_slidesCollapseButton->setIcon(IconProvider::icon(collapsed ? QStringLiteral("chevron-down") : QStringLiteral("chevron-up"),
+                                                        QColor(Theme::TextDarkSecondary), 16));
+    m_slidesCollapseButton->setToolTip(collapsed ? tr("Показать слайды") : tr("Скрыть слайды"));
+
+    // Same as SlideStripPanel: drive setFixedHeight() by hand so the strip
+    // stays rigid at every step instead of being squeezed by the layout.
+    if (!m_slidesCollapseAnimation) {
+        m_slidesCollapseAnimation = new QVariantAnimation(this);
+        m_slidesCollapseAnimation->setDuration(180);
+        m_slidesCollapseAnimation->setEasingCurve(QEasingCurve::InOutQuad);
+        connect(m_slidesCollapseAnimation, &QVariantAnimation::valueChanged, this, [this](const QVariant &value) {
+            m_slidesScroll->setFixedHeight(value.toInt());
+        });
+    }
+    m_slidesCollapseAnimation->stop();
+    m_slidesCollapseAnimation->setStartValue(m_slidesScroll->height());
+    m_slidesCollapseAnimation->setEndValue(collapsed ? 0 : 148);
+    m_slidesCollapseAnimation->start();
 }
 
 void BiblePanel::triggerGoLive()
@@ -750,7 +1006,9 @@ ContentItem BiblePanel::currentItem() const
 {
     ContentItem item;
     item.type = ContentType::BibleVerse;
-    item.refBook = bookName(m_currentBook);
+    item.refBook = AppSettings::value(AppSettings::BibleRefFormat).toString() == QLatin1String("short")
+        ? BibleRepository::abbreviation(m_currentBook, bookName(m_currentBook))
+        : bookName(m_currentBook);
     item.refLocation = m_currentFrom == m_currentTo
         ? QStringLiteral("%1:%2").arg(m_currentChapter).arg(m_currentFrom)
         : QStringLiteral("%1:%2–%3").arg(m_currentChapter).arg(m_currentFrom).arg(m_currentTo);
